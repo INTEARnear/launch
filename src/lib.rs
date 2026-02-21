@@ -1,276 +1,373 @@
-// Find NEAR documentation at https://docs.near.org
-use near_sdk::json_types::U64;
-use near_sdk::{AccountId, NearToken, PanicOnDefault, Promise, Timestamp, env, near, require};
+use std::collections::HashMap;
 
-// Define the contract structure
+use near_contract_standards::fungible_token::metadata::FungibleTokenMetadata;
+use near_sdk::{
+    AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
+    json_types::{Base64VecU8, U128},
+    near, require,
+    store::{LookupMap, LookupSet},
+};
+
+const INTEAR_DEX_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
+const PLACH_POOL_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(15); // 0.015 NEAR
+const FT_STORAGE_DEPOSIT: NearToken = NearToken::from_micronear(1250); // 0.00125 NEAR
+const OWN_STORAGE_EXPENSES: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
+
+const SHORT_ID_COST: NearToken = NearToken::from_near(1);
+const LONG_ID_COST: NearToken = NearToken::from_yoctonear(
+    INTEAR_DEX_STORAGE_DEPOSIT.as_yoctonear()
+        + PLACH_POOL_STORAGE_DEPOSIT.as_yoctonear()
+        + OWN_STORAGE_EXPENSES.as_yoctonear()
+        + FT_STORAGE_DEPOSIT.as_yoctonear(),
+);
+const _: () = assert!(SHORT_ID_COST.as_yoctonear() > LONG_ID_COST.as_yoctonear());
+
+const TOKEN_CODE_HASH: &str = "8D1NEU2NC2hKhdtCkHyyAz2KVmVXRazm9ZQMC27D97jF";
+const INTEAR_DEX_CONTRACT_ID: &str = "dex.intear.near";
+const PLACH_DEX_ID: &str = "slimedragon.near/xyk";
+const PHANTOM_LIQUIDITY_NEAR: NearToken = NearToken::from_near(300);
+
 #[near(contract_state)]
-#[derive(PanicOnDefault)] // The contract is required to be initialized with `#[init]` functions
+#[derive(PanicOnDefault)]
 pub struct Contract {
-    highest_bid: Bid,
-    auction_end_time: Timestamp,
-    auctioneer: AccountId,
-    is_claimed: bool,
+    ids_taken: LookupSet<AccountId>,
+    meme_id_counter: LookupMap<String, u64>,
+    fees_earned: NearToken,
 }
 
-// The Bid structure is used as function return value (JSON-serialized) and as part of the Contract
-// state (Borsh-serialized)
-#[near(serializers = [json, borsh])]
-#[derive(Clone)]
-pub struct Bid {
-    pub bidder: AccountId,
-    pub bid: NearToken,
+#[near(serializers=[borsh])]
+#[derive(BorshStorageKey)]
+enum StorageKey {
+    NamesTaken,
+    IdCounter,
 }
 
-// Implement the contract functions
 #[near]
 impl Contract {
-    /// Initializer function that one must call after the contract code is deployed to an account
-    /// for the first time, all other functions will fail to execute until the contract state is
-    /// initialized (thanks to PanicOnDefault derive above).
-    /// It is common to batch contract initialization in the same transaction as contract deployment.
-    /// Sometimes #[private] attribute can also be useful to guard the function to be callable only
-    /// by the account where the contract is deployed to.
     #[init]
-    pub fn init(end_time: U64, auctioneer: AccountId) -> Self {
+    pub fn new() -> Self {
         Self {
-            highest_bid: Bid {
-                bidder: env::current_account_id(),
-                bid: NearToken::from_yoctonear(1),
-            },
-            auction_end_time: end_time.into(),
-            is_claimed: false,
-            auctioneer,
+            ids_taken: LookupSet::new(StorageKey::NamesTaken),
+            meme_id_counter: LookupMap::new(StorageKey::IdCounter),
+            fees_earned: Default::default(),
         }
     }
 
-    /// Bid function can be called by any account on blockchain to make a higher bid on the auction
+    pub fn short_id_cost(&self) -> NearToken {
+        SHORT_ID_COST
+    }
+
+    pub fn long_id_cost(&self) -> NearToken {
+        LONG_ID_COST
+    }
+
+    pub fn fees_earned(&self) -> NearToken {
+        self.fees_earned
+    }
+
+    #[private]
+    pub fn withdraw_fees(&mut self, to: AccountId) {
+        Promise::new(to).transfer(self.fees_earned).detach();
+        self.fees_earned = NearToken::ZERO;
+    }
+
+    pub fn preview_id(&self, symbol: String, short_id: bool) -> AccountId {
+        if short_id {
+            require!(
+                !symbol.contains("-"),
+                "Symbol cannot contain hyphens when using a short ID"
+            );
+            let account_id = format!("{symbol}.{}", near_sdk::env::current_account_id())
+                .parse::<AccountId>()
+                .expect("Invalid account ID to be created. Try using a shorter ticker.");
+            if self.ids_taken.contains(&account_id) {
+                panic!("Short account ID for this symbol is already taken");
+            }
+            account_id
+        } else {
+            let next_meme_id = self
+                .meme_id_counter
+                .get(&symbol)
+                .copied()
+                .unwrap_or_default()
+                + 1;
+            format!(
+                "{symbol}-{next_meme_id}.{}",
+                near_sdk::env::current_account_id()
+            )
+            .parse::<AccountId>()
+            .expect("Invalid account ID to be created. Try using a longer ticker.")
+        }
+    }
+
     #[payable]
-    pub fn bid(&mut self) -> Promise {
-        // Assert the auction is still ongoing
-        require!(
-            env::block_timestamp() < self.auction_end_time,
-            "Auction has ended"
-        );
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_token(
+        &mut self,
+        name: String,
+        symbol: String,
+        icon: Option<String>,
+        decimals: u8,
+        total_supply: U128,
+        short_id: bool,
+        fees: Option<Vec<FeeEntry>>,
+    ) -> AccountId {
+        let cost = if short_id {
+            SHORT_ID_COST
+        } else {
+            LONG_ID_COST
+        };
 
-        // Current bid
-        let bid = env::attached_deposit();
-        let bidder = env::predecessor_account_id();
+        let Some(storage_deposit) = near_sdk::env::attached_deposit().checked_sub(cost) else {
+            panic!("Insufficient deposit for launch cost. Attach at least {cost}");
+        };
+        self.fees_earned = self.fees_earned.checked_add(cost).unwrap();
 
-        // Last bid recorded by the contract
-        let Bid {
-            bidder: last_bidder,
-            bid: last_bid,
-        } = self.highest_bid.clone();
+        let account_id = if short_id {
+            require!(
+                !symbol.contains("-"),
+                "Symbol cannot contain hyphens when using a short ID"
+            );
+            let account_id = format!("{symbol}.{}", near_sdk::env::current_account_id())
+                .parse::<AccountId>()
+                .expect("Invalid account ID to be created. Try using a shorter ticker.");
+            if !self.ids_taken.insert(account_id.clone()) {
+                panic!("Short account ID for this symbol is already taken");
+            }
+            account_id
+        } else {
+            let next_meme_id = self
+                .meme_id_counter
+                .get(&symbol)
+                .copied()
+                .unwrap_or_default()
+                + 1;
+            self.meme_id_counter.insert(symbol.clone(), next_meme_id);
+            format!(
+                "{symbol}-{next_meme_id}.{}",
+                near_sdk::env::current_account_id()
+            )
+            .parse::<AccountId>()
+            .expect("Invalid account ID to be created. Try using a longer ticker.")
+        };
 
-        // Check if the deposit is higher than the current bid
-        require!(bid > last_bid, "You must place a higher bid");
+        let create_token_promise = Promise::new(account_id.clone())
+            .create_account()
+            .use_global_contract(
+                <[u8; 32]>::try_from(near_sdk::bs58::decode(TOKEN_CODE_HASH).into_vec().unwrap())
+                    .unwrap(),
+            )
+            .transfer(storage_deposit)
+            .function_call(
+                "new",
+                near_sdk::serde_json::json!({
+                    "owner_id": near_sdk::env::current_account_id(),
+                    "total_supply": total_supply,
+                    "metadata": FungibleTokenMetadata {
+                        spec: "ft-1.0.0".to_string(),
+                        name,
+                        symbol,
+                        icon,
+                        reference: None,
+                        reference_hash: None,
+                        decimals,
+                    }
+                })
+                .to_string()
+                .into_bytes(),
+                NearToken::ZERO,
+                Gas::from_tgas(30),
+            );
 
-        // Update the highest bid
-        self.highest_bid = Bid { bidder, bid };
+        let prepare_dex_promise = Promise::new(INTEAR_DEX_CONTRACT_ID.parse().unwrap())
+            .function_call(
+                "storage_deposit",
+                near_sdk::serde_json::json!({}).to_string().into_bytes(),
+                INTEAR_DEX_STORAGE_DEPOSIT,
+                Gas::from_tgas(10),
+            )
+            .function_call(
+                "register_assets",
+                near_sdk::serde_json::json!({
+                    "asset_ids": [
+                        format!("nep141:{account_id}")
+                    ]
+                })
+                .to_string()
+                .into_bytes(),
+                NearToken::from_yoctonear(1),
+                Gas::from_tgas(10),
+            )
+            .function_call(
+                "register_assets",
+                near_sdk::serde_json::json!({
+                    "asset_ids": [
+                        format!("nep141:{account_id}"),
+                    ],
+                    "for": {
+                        "Dex": PLACH_DEX_ID,
+                    },
+                })
+                .to_string()
+                .into_bytes(),
+                NearToken::from_yoctonear(1),
+                Gas::from_tgas(10),
+            )
+            .function_call(
+                "deposit_near",
+                near_sdk::serde_json::json!({}).to_string().into_bytes(),
+                PLACH_POOL_STORAGE_DEPOSIT,
+                Gas::from_tgas(10),
+            );
 
-        // Transfer tokens back to the last bidder.
-        //
-        // NOTE: The result of this Promise is not handled. If this transfer fails (for example,
-        // because `last_bidder` account was removed), the previous bidder may not be refunded even
-        // though `self.highest_bid` has already been updated. For production use, consider
-        // implementing a withdrawal pattern or adding a callback to handle transfer failures.
-        Promise::new(last_bidder).transfer(last_bid)
-    }
+        let transfer_to_dex_promise = Promise::new(account_id.clone())
+            .function_call(
+                "storage_deposit",
+                near_sdk::serde_json::json!({
+                    "account_id": INTEAR_DEX_CONTRACT_ID,
+                    "registration_only": true,
+                })
+                .to_string()
+                .into_bytes(),
+                FT_STORAGE_DEPOSIT,
+                Gas::from_tgas(10),
+            )
+            .function_call(
+                "ft_transfer_call",
+                near_sdk::serde_json::json!({
+                    "receiver_id": INTEAR_DEX_CONTRACT_ID,
+                    "amount": total_supply,
+                    "memo": null,
+                    "msg": "",
+                })
+                .to_string()
+                .into_bytes(),
+                NearToken::from_yoctonear(1),
+                Gas::from_tgas(40),
+            );
 
-    /// Claim function can be called by any account on blockchain to claim the auction and transfer
-    /// the tokens to the auctioneer
-    pub fn claim(&mut self) -> Promise {
-        // Assert the auction has ended
-        require!(
-            env::block_timestamp() > self.auction_end_time,
-            "Auction has not ended yet"
-        );
+        let create_pool_promise = Promise::new(INTEAR_DEX_CONTRACT_ID.parse().unwrap())
+            .function_call(
+                "execute_operations",
+                near_sdk::serde_json::json!({
+                    "operations": [
+                        Operation::DexCall {
+                            dex_id: PLACH_DEX_ID.to_string(),
+                            method: "create_pool".to_string(),
+                            args: Base64VecU8(
+                                near_sdk::borsh::to_vec(&CreatePoolArgs {
+                                    assets: (AssetId::Near, AssetId::Nep141(account_id.clone())),
+                                    fees: FeeConfiguration::V2(V2FeeConfiguration {
+                                        receivers: fees.unwrap_or_default()
+                                    }),
+                                    pool_type: PoolType::LaunchV1 {
+                                        phantom_liquidity_near: U128(PHANTOM_LIQUIDITY_NEAR.as_yoctonear())
+                                    },
+                                })
+                                .unwrap(),
+                            ),
+                            attached_assets: HashMap::from_iter([
+                                (
+                                    "near".to_string(),
+                                    U128(PLACH_POOL_STORAGE_DEPOSIT.as_yoctonear()),
+                                ),
+                                (
+                                    format!("nep141:{account_id}").to_string(),
+                                    total_supply,
+                                ),
+                            ]),
+                        },
+                    ]
+                }).to_string().into_bytes(),
+                NearToken::from_yoctonear(1),
+                Gas::from_tgas(120),
+            );
 
-        // Assert the auction has not been claimed yet
-        require!(!self.is_claimed, "Auction has already been claimed");
-        self.is_claimed = true;
+        create_token_promise
+            .then(prepare_dex_promise)
+            .then(transfer_to_dex_promise)
+            .then(create_pool_promise)
+            .detach();
 
-        // Transfer tokens to the auctioneer.
-        //
-        // NOTE: The result of this Promise is not handled. If this transfer fails (for example,
-        // because `last_bidder` account was removed), the previous bidder may not be refunded even
-        // though `self.highest_bid` has already been updated. For production use, consider
-        // implementing a withdrawal pattern or adding a callback to handle transfer failures.
-        Promise::new(self.auctioneer.clone()).transfer(self.highest_bid.bid)
-    }
-
-    /*
-     * The functions below are read-only functions that can be called without a transaction (through
-     * JSON RPC query call). They read the data from the contract local storage and return the
-     * highest bid, auction end time, auctioneer, and claimed status
-     */
-
-    pub fn get_highest_bid(&self) -> Bid {
-        self.highest_bid.clone()
-    }
-
-    pub fn get_auction_end_time(&self) -> U64 {
-        self.auction_end_time.into()
-    }
-
-    pub fn get_auctioneer(&self) -> AccountId {
-        self.auctioneer.clone()
-    }
-
-    pub fn is_already_claimed(&self) -> bool {
-        self.is_claimed
+        account_id
     }
 }
 
-/*
- * The rest of this file holds the inline tests for the code above
- * Learn more about Rust tests: https://doc.rust-lang.org/book/ch11-01-writing-tests.html
- */
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use near_sdk::json_types::U64;
-    use near_sdk::test_utils::{VMContextBuilder, accounts};
-    use near_sdk::{AccountId, testing_env};
+#[derive(near_sdk::serde::Serialize)]
+#[serde(crate = "near_sdk::serde")]
+pub enum Operation {
+    DexCall {
+        dex_id: String,
+        method: String,
+        args: Base64VecU8,
+        attached_assets: HashMap<String, U128>,
+    },
+}
 
-    fn get_context(predecessor_account_id: AccountId) -> VMContextBuilder {
-        let mut builder = VMContextBuilder::new();
-        builder
-            .current_account_id(accounts(0))
-            .signer_account_id(predecessor_account_id.clone())
-            .predecessor_account_id(predecessor_account_id);
-        builder
-    }
+#[near(serializers=[borsh])]
+struct CreatePoolArgs {
+    assets: (AssetId, AssetId),
+    fees: FeeConfiguration,
+    pool_type: PoolType,
+}
 
-    #[test]
-    fn init_contract() {
-        let end_time: U64 = U64::from(1000);
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let contract = Contract::init(end_time, alice.clone());
+#[near(serializers=[borsh])]
+pub enum AssetId {
+    Near,
+    Nep141(AccountId),
+    Nep245(AccountId, String),
+    Nep171(AccountId, String),
+}
 
-        let default_bid = contract.get_highest_bid();
-        assert_eq!(default_bid.bidder, env::current_account_id());
-        assert_eq!(default_bid.bid, NearToken::from_yoctonear(1));
+#[near(serializers=[borsh])]
+enum PoolType {
+    PrivateLatest,
+    PublicLatest,
+    LaunchLatest { phantom_liquidity_near: U128 },
+    LaunchV1 { phantom_liquidity_near: U128 },
+    PrivateV1,
+    PublicV1,
+    PrivateV2,
+    PublicV2,
+}
 
-        let auction_end_time = contract.get_auction_end_time();
-        assert_eq!(auction_end_time, end_time);
+#[near(serializers=[borsh, json])]
+enum FeeConfiguration {
+    V1(/* not supported */),
+    V2(V2FeeConfiguration),
+}
 
-        let auctioneer = contract.get_auctioneer();
-        assert_eq!(auctioneer, alice);
+pub type FeeEntry = (FeeReceiver, FeeAmount);
 
-        assert!(!contract.is_already_claimed());
-    }
+#[near(serializers=[borsh, json])]
+struct V2FeeConfiguration {
+    receivers: Vec<FeeEntry>,
+}
 
-    #[test]
-    fn bid_successfully() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
+#[near(serializers=[borsh, json])]
+#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
+pub enum FeeReceiver {
+    Account(AccountId),
+    Pool,
+}
 
-        // Set block_timestamp before auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(500);
-        context.attached_deposit(NearToken::from_near(2));
-        testing_env!(context.build());
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy)]
+pub enum FeeAmount {
+    Fixed(u32),
+    Scheduled {
+        start: (u64, u32),
+        end: (u64, u32),
+        curve: ScheduledFeeCurve,
+    },
+    Dynamic {
+        min: u32,
+        max: u32,
+    },
+}
 
-        // Bid should succeed
-        let _ = contract.bid();
-
-        // Verify highest bid is updated
-        let highest_bid = contract.get_highest_bid();
-        assert_eq!(highest_bid.bidder, alice);
-        assert_eq!(highest_bid.bid, NearToken::from_near(2));
-    }
-
-    #[test]
-    #[should_panic(expected = "Auction has ended")]
-    fn bid_after_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp after auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(2000);
-        context.attached_deposit(NearToken::from_near(2));
-        testing_env!(context.build());
-
-        // Bid should panic
-        let _ = contract.bid();
-    }
-
-    #[test]
-    #[should_panic(expected = "You must place a higher bid")]
-    fn bid_lower_than_current() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp before auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(500);
-        // Default bid is 1 yoctoNEAR, so bidding with 0 or less should fail
-        // But we'll bid with the same amount (1 yoctoNEAR) which should also fail
-        context.attached_deposit(NearToken::from_yoctonear(1));
-        testing_env!(context.build());
-
-        // Bid should panic
-        let _ = contract.bid();
-    }
-
-    #[test]
-    fn claim_after_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp after auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(2000);
-        testing_env!(context.build());
-
-        // Claim should succeed
-        let _ = contract.claim();
-
-        // Verify auction is marked as claimed
-        assert!(contract.is_already_claimed());
-    }
-
-    #[test]
-    #[should_panic(expected = "Auction has not ended yet")]
-    fn claim_before_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp before auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(500);
-        testing_env!(context.build());
-
-        // Claim should panic
-        let _ = contract.claim();
-    }
-
-    #[test]
-    #[should_panic(expected = "Auction has already been claimed")]
-    fn claim_twice() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp after auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(2000);
-        testing_env!(context.build());
-
-        // First claim should succeed
-        let _ = contract.claim();
-
-        // Second claim should panic
-        let _ = contract.claim();
-    }
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy)]
+pub enum ScheduledFeeCurve {
+    Linear,
 }
