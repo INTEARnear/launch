@@ -5,32 +5,61 @@ use near_sdk::{
     AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
     json_types::{Base64VecU8, U128},
     near, require,
-    store::{LookupMap, LookupSet},
+    store::LookupMap,
 };
 
 const INTEAR_DEX_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
-const PLACH_POOL_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(15); // 0.015 NEAR
+const PLACH_POOL_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(3); // 0.003 NEAR
 const FT_STORAGE_DEPOSIT: NearToken = NearToken::from_micronear(1250); // 0.00125 NEAR
 const OWN_STORAGE_EXPENSES: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
 
-const SHORT_ID_COST: NearToken = NearToken::from_near(1);
-const LONG_ID_COST: NearToken = NearToken::from_yoctonear(
+// 0.01925 NEAR
+const ID_COST: NearToken = NearToken::from_yoctonear(
     INTEAR_DEX_STORAGE_DEPOSIT.as_yoctonear()
         + PLACH_POOL_STORAGE_DEPOSIT.as_yoctonear()
         + OWN_STORAGE_EXPENSES.as_yoctonear()
         + FT_STORAGE_DEPOSIT.as_yoctonear(),
 );
-const _: () = assert!(SHORT_ID_COST.as_yoctonear() > LONG_ID_COST.as_yoctonear());
+const SHORT_ID_COST: NearToken = NearToken::from_near(1);
 
 const TOKEN_CODE_HASH: &str = "8D1NEU2NC2hKhdtCkHyyAz2KVmVXRazm9ZQMC27D97jF";
 const INTEAR_DEX_CONTRACT_ID: &str = "dex.intear.near";
 const PLACH_DEX_ID: &str = "slimedragon.near/xyk";
 const PHANTOM_LIQUIDITY_NEAR: NearToken = NearToken::from_near(300);
 
+#[near(serializers=[borsh, json])]
+pub struct LaunchData {
+    telegram: Option<String>,
+    x: Option<String>,
+    website: Option<String>,
+}
+
+impl LaunchData {
+    fn validate(&self) {
+        const MAX_LENGTH: usize = 100;
+        require!(
+            self.telegram
+                .as_ref()
+                .is_none_or(|url| url.len() <= MAX_LENGTH),
+            "Telegram URL must be less than {MAX_LENGTH} characters."
+        );
+        require!(
+            self.x.as_ref().is_none_or(|url| url.len() <= MAX_LENGTH),
+            "X URL must be less than {MAX_LENGTH} characters."
+        );
+        require!(
+            self.website
+                .as_ref()
+                .is_none_or(|url| url.len() <= MAX_LENGTH),
+            "Website URL must be less than {MAX_LENGTH} characters."
+        );
+    }
+}
+
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Contract {
-    ids_taken: LookupSet<AccountId>,
+    launch_data: LookupMap<AccountId, LaunchData>,
     meme_id_counter: LookupMap<String, u64>,
     fees_earned: NearToken,
 }
@@ -38,7 +67,7 @@ pub struct Contract {
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {
-    NamesTaken,
+    LaunchData,
     IdCounter,
 }
 
@@ -47,7 +76,7 @@ impl Contract {
     #[init]
     pub fn new() -> Self {
         Self {
-            ids_taken: LookupSet::new(StorageKey::NamesTaken),
+            launch_data: LookupMap::new(StorageKey::LaunchData),
             meme_id_counter: LookupMap::new(StorageKey::IdCounter),
             fees_earned: Default::default(),
         }
@@ -58,7 +87,7 @@ impl Contract {
     }
 
     pub fn long_id_cost(&self) -> NearToken {
-        LONG_ID_COST
+        ID_COST
     }
 
     pub fn fees_earned(&self) -> NearToken {
@@ -72,32 +101,37 @@ impl Contract {
     }
 
     pub fn preview_id(&self, symbol: String, short_id: bool) -> AccountId {
+        let symbol_lower = symbol.to_lowercase();
         if short_id {
             require!(
                 !symbol.contains("-"),
                 "Symbol cannot contain hyphens when using a short ID"
             );
-            let account_id = format!("{symbol}.{}", near_sdk::env::current_account_id())
+            let account_id = format!("{symbol_lower}.{}", near_sdk::env::current_account_id())
                 .parse::<AccountId>()
                 .expect("Invalid account ID to be created. Try using a shorter ticker.");
-            if self.ids_taken.contains(&account_id) {
-                panic!("Short account ID for this symbol is already taken");
+            if self.launch_data.contains_key(&account_id) {
+                panic!("Short account ID for this symbol is already taken.");
             }
             account_id
         } else {
             let next_meme_id = self
                 .meme_id_counter
-                .get(&symbol)
+                .get(&symbol_lower)
                 .copied()
                 .unwrap_or_default()
                 + 1;
             format!(
-                "{symbol}-{next_meme_id}.{}",
+                "{symbol_lower}-{next_meme_id}.{}",
                 near_sdk::env::current_account_id()
             )
             .parse::<AccountId>()
             .expect("Invalid account ID to be created. Try using a longer ticker.")
         }
+    }
+
+    pub fn get_launch_data(&self, token_account_id: AccountId) -> Option<&LaunchData> {
+        self.launch_data.get(&token_account_id)
     }
 
     #[payable]
@@ -111,45 +145,82 @@ impl Contract {
         total_supply: U128,
         short_id: bool,
         fees: Option<Vec<FeeEntry>>,
+        launch_data: LaunchData,
     ) -> AccountId {
+        launch_data.validate();
+        let symbol_lower = symbol.to_lowercase();
+
+        let own_storage_allowed = u64::try_from(
+            OWN_STORAGE_EXPENSES.as_yoctonear() / near_sdk::env::storage_byte_cost().as_yoctonear(),
+        )
+        .unwrap();
+        let storage_usage_before = near_sdk::env::storage_usage();
+
         let cost = if short_id {
-            SHORT_ID_COST
+            SHORT_ID_COST.checked_add(ID_COST).unwrap()
         } else {
-            LONG_ID_COST
+            ID_COST
         };
 
         let Some(storage_deposit) = near_sdk::env::attached_deposit().checked_sub(cost) else {
-            panic!("Insufficient deposit for launch cost. Attach at least {cost}");
+            panic!("Insufficient deposit for launch cost. Attach at least {cost}.");
         };
-        self.fees_earned = self.fees_earned.checked_add(cost).unwrap();
 
         let account_id = if short_id {
             require!(
                 !symbol.contains("-"),
-                "Symbol cannot contain hyphens when using a short ID"
+                "Symbol cannot contain hyphens when using a short ID."
             );
-            let account_id = format!("{symbol}.{}", near_sdk::env::current_account_id())
+            let account_id = format!("{symbol_lower}.{}", near_sdk::env::current_account_id())
                 .parse::<AccountId>()
                 .expect("Invalid account ID to be created. Try using a shorter ticker.");
-            if !self.ids_taken.insert(account_id.clone()) {
+            if self
+                .launch_data
+                .insert(account_id.clone(), launch_data)
+                .is_some()
+            {
                 panic!("Short account ID for this symbol is already taken");
             }
             account_id
         } else {
             let next_meme_id = self
                 .meme_id_counter
-                .get(&symbol)
+                .get(&symbol_lower)
                 .copied()
                 .unwrap_or_default()
                 + 1;
-            self.meme_id_counter.insert(symbol.clone(), next_meme_id);
-            format!(
-                "{symbol}-{next_meme_id}.{}",
+            self.meme_id_counter
+                .insert(symbol_lower.clone(), next_meme_id);
+            let account_id = format!(
+                "{symbol_lower}-{next_meme_id}.{}",
                 near_sdk::env::current_account_id()
             )
             .parse::<AccountId>()
-            .expect("Invalid account ID to be created. Try using a longer ticker.")
+            .expect("Invalid account ID to be created. Try using a longer ticker.");
+            if self
+                .launch_data
+                .insert(account_id.clone(), launch_data)
+                .is_some()
+            {
+                panic!("Long account ID for this symbol is already taken. This is a bug.");
+            }
+            account_id
         };
+
+        self.launch_data.flush();
+        self.meme_id_counter.flush();
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_usage = storage_usage_after
+            .checked_sub(storage_usage_before)
+            .unwrap();
+        require!(
+            storage_usage <= own_storage_allowed,
+            "Insufficient deposit for storage cost. Attach at least {storage_cost}."
+        );
+
+        if short_id {
+            self.fees_earned = self.fees_earned.checked_add(SHORT_ID_COST).unwrap();
+        }
 
         let create_token_promise = Promise::new(account_id.clone())
             .create_account()
