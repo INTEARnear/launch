@@ -9,11 +9,11 @@ use near_sdk::{
 };
 
 const INTEAR_DEX_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
-const PLACH_POOL_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(3); // 0.003 NEAR
+const PLACH_POOL_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
 const FT_STORAGE_DEPOSIT: NearToken = NearToken::from_micronear(1250); // 0.00125 NEAR
 const OWN_STORAGE_EXPENSES: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
 
-// 0.01925 NEAR
+// 0.02625 NEAR
 const ID_COST: NearToken = NearToken::from_yoctonear(
     INTEAR_DEX_STORAGE_DEPOSIT.as_yoctonear()
         + PLACH_POOL_STORAGE_DEPOSIT.as_yoctonear()
