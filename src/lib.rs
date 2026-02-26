@@ -32,26 +32,56 @@ pub struct LaunchData {
     telegram: Option<String>,
     x: Option<String>,
     website: Option<String>,
+    description: Option<String>,
 }
 
 impl LaunchData {
     fn validate(&self) {
-        const MAX_LENGTH: usize = 100;
+        const MAX_URL_LENGTH: usize = 50;
         require!(
             self.telegram
                 .as_ref()
-                .is_none_or(|url| url.len() <= MAX_LENGTH),
-            "Telegram URL must be less than {MAX_LENGTH} characters."
+                .is_none_or(|url| url.len() <= MAX_URL_LENGTH),
+            "Telegram URL must be less than {MAX_URL_LENGTH} characters."
         );
         require!(
-            self.x.as_ref().is_none_or(|url| url.len() <= MAX_LENGTH),
-            "X URL must be less than {MAX_LENGTH} characters."
+            self.telegram.as_ref().is_none_or(|url| {
+                url.strip_prefix("https://t.me/")
+                    .is_some_and(|handle| !handle.contains('/'))
+            }),
+            "Telegram handle must not contain '/'."
+        );
+        require!(
+            self.x
+                .as_ref()
+                .is_none_or(|url| url.len() <= MAX_URL_LENGTH),
+            "X URL must be less than {MAX_URL_LENGTH} characters."
+        );
+        require!(
+            self.x.as_ref().is_none_or(|url| {
+                url.strip_prefix("https://x.com/")
+                    .is_some_and(|handle| !handle.contains('/'))
+            }),
+            "X handle must not contain '/'."
         );
         require!(
             self.website
                 .as_ref()
-                .is_none_or(|url| url.len() <= MAX_LENGTH),
-            "Website URL must be less than {MAX_LENGTH} characters."
+                .is_none_or(|url| url.len() <= MAX_URL_LENGTH),
+            "Website URL must be less than {MAX_URL_LENGTH} characters."
+        );
+        require!(
+            self.website
+                .as_ref()
+                .is_none_or(|url| url.starts_with("https://")),
+            "Website URL must start with https://."
+        );
+        const MAX_DESCRIPTION_LENGTH: usize = 200;
+        require!(
+            self.description
+                .as_ref()
+                .is_none_or(|desc| desc.len() <= MAX_DESCRIPTION_LENGTH),
+            "Description must be less than {MAX_DESCRIPTION_LENGTH} characters."
         );
     }
 }
