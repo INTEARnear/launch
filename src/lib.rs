@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use near_contract_standards::fungible_token::metadata::FungibleTokenMetadata;
 use near_sdk::{
-    AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
+    AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise, Timestamp,
     json_types::{Base64VecU8, U128},
     near, require,
     store::LookupMap,
@@ -32,6 +32,7 @@ pub struct LaunchInfo {
     #[serde(flatten)]
     data: LaunchData,
     launched_by: AccountId,
+    launched_at_ns: Timestamp,
 }
 
 #[near(serializers=[borsh, json])]
@@ -140,6 +141,7 @@ impl Contract {
                 LaunchInfo {
                     data: launch_data.clone(),
                     launched_by: "slimedragon.near".parse().unwrap(),
+                    launched_at_ns: near_sdk::env::block_timestamp(),
                 },
             );
         }
@@ -257,6 +259,7 @@ impl Contract {
                     LaunchInfo {
                         data: launch_data,
                         launched_by: near_sdk::env::predecessor_account_id(),
+                        launched_at_ns: near_sdk::env::block_timestamp(),
                     },
                 )
                 .is_some()
@@ -286,6 +289,7 @@ impl Contract {
                     LaunchInfo {
                         data: launch_data,
                         launched_by: near_sdk::env::predecessor_account_id(),
+                        launched_at_ns: near_sdk::env::block_timestamp(),
                     },
                 )
                 .is_some()
