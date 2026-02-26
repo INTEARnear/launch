@@ -397,7 +397,11 @@ impl Contract {
                 })
                 .to_string()
                 .into_bytes(),
-                NearToken::from_yoctonear(1),
+                if let Some(first_buy) = first_buy {
+                    first_buy
+                } else {
+                    NearToken::from_yoctonear(1)
+                },
                 Gas::from_tgas(150),
             );
 
