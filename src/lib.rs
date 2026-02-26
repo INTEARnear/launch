@@ -122,40 +122,6 @@ impl Contract {
         }
     }
 
-    #[init(ignore_state)]
-    #[private]
-    pub fn migrate(tokens: Vec<AccountId>) -> Self {
-        #[near(serializers=[borsh])]
-        struct OldContract {
-            launch_data: LookupMap<AccountId, LaunchData>,
-            meme_id_counter: LookupMap<String, u64>,
-            fees_earned: NearToken,
-        }
-        let old_state: OldContract =
-            near_sdk::borsh::from_slice(&near_sdk::env::storage_read(b"STATE").unwrap()).unwrap();
-        let mut launch_data_hashmap = HashMap::new();
-        for token in tokens {
-            let launch_data = old_state.launch_data.get(&token).unwrap();
-            launch_data_hashmap.insert(
-                token,
-                LaunchInfo {
-                    data: launch_data.clone(),
-                    launched_by: "slimedragon.near".parse().unwrap(),
-                    launched_at_ns: near_sdk::env::block_timestamp(),
-                },
-            );
-        }
-        let mut new_launch_data = LookupMap::new(StorageKey::LaunchData);
-        for (token, launch_info) in launch_data_hashmap {
-            new_launch_data.insert(token, launch_info);
-        }
-        Self {
-            launch_data: new_launch_data,
-            meme_id_counter: old_state.meme_id_counter,
-            fees_earned: old_state.fees_earned,
-        }
-    }
-
     pub fn short_id_cost(&self) -> NearToken {
         SHORT_ID_COST
     }
