@@ -251,7 +251,7 @@ impl Contract {
                 .to_string()
                 .into_bytes(),
                 NearToken::ZERO,
-                Gas::from_tgas(30),
+                Gas::from_tgas(10),
             );
 
         let prepare_dex_promise = Promise::new(INTEAR_DEX_CONTRACT_ID.parse().unwrap())
@@ -259,7 +259,7 @@ impl Contract {
                 "storage_deposit",
                 near_sdk::serde_json::json!({}).to_string().into_bytes(),
                 INTEAR_DEX_STORAGE_DEPOSIT,
-                Gas::from_tgas(10),
+                Gas::from_tgas(5),
             )
             .function_call(
                 "register_assets",
@@ -271,7 +271,7 @@ impl Contract {
                 .to_string()
                 .into_bytes(),
                 NearToken::from_yoctonear(1),
-                Gas::from_tgas(10),
+                Gas::from_tgas(5),
             )
             .function_call(
                 "register_assets",
@@ -286,13 +286,13 @@ impl Contract {
                 .to_string()
                 .into_bytes(),
                 NearToken::from_yoctonear(1),
-                Gas::from_tgas(10),
+                Gas::from_tgas(5),
             )
             .function_call(
                 "deposit_near",
                 near_sdk::serde_json::json!({}).to_string().into_bytes(),
                 PLACH_POOL_STORAGE_DEPOSIT,
-                Gas::from_tgas(10),
+                Gas::from_tgas(5),
             );
 
         let transfer_to_dex_promise = Promise::new(account_id.clone())
@@ -305,7 +305,7 @@ impl Contract {
                 .to_string()
                 .into_bytes(),
                 FT_STORAGE_DEPOSIT,
-                Gas::from_tgas(10),
+                Gas::from_tgas(5),
             )
             .function_call(
                 "storage_deposit",
@@ -316,7 +316,7 @@ impl Contract {
                 .to_string()
                 .into_bytes(),
                 FT_STORAGE_DEPOSIT,
-                Gas::from_tgas(10),
+                Gas::from_tgas(5),
             )
             .function_call(
                 "ft_transfer_call",
@@ -398,7 +398,7 @@ impl Contract {
                 .to_string()
                 .into_bytes(),
                 NearToken::from_yoctonear(1),
-                Gas::from_tgas(200),
+                Gas::from_tgas(150),
             );
 
         create_token_promise
