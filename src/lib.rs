@@ -28,6 +28,14 @@ const PLACH_DEX_ID: &str = "slimedragon.near/xyk";
 const PHANTOM_LIQUIDITY_NEAR: NearToken = NearToken::from_near(300);
 
 #[near(serializers=[borsh, json])]
+pub struct LaunchInfo {
+    #[serde(flatten)]
+    data: LaunchData,
+    launched_by: AccountId,
+}
+
+#[near(serializers=[borsh, json])]
+#[derive(Clone)]
 pub struct LaunchData {
     telegram: Option<String>,
     x: Option<String>,
@@ -89,7 +97,7 @@ impl LaunchData {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Contract {
-    launch_data: LookupMap<AccountId, LaunchData>,
+    launch_data: LookupMap<AccountId, LaunchInfo>,
     meme_id_counter: LookupMap<String, u64>,
     fees_earned: NearToken,
 }
@@ -97,8 +105,9 @@ pub struct Contract {
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {
-    LaunchData,
+    LegacyLaunchData,
     IdCounter,
+    LaunchData,
 }
 
 #[near]
@@ -109,6 +118,39 @@ impl Contract {
             launch_data: LookupMap::new(StorageKey::LaunchData),
             meme_id_counter: LookupMap::new(StorageKey::IdCounter),
             fees_earned: Default::default(),
+        }
+    }
+
+    #[init(ignore_state)]
+    #[private]
+    pub fn migrate(tokens: Vec<AccountId>) -> Self {
+        #[near(serializers=[borsh])]
+        struct OldContract {
+            launch_data: LookupMap<AccountId, LaunchData>,
+            meme_id_counter: LookupMap<String, u64>,
+            fees_earned: NearToken,
+        }
+        let old_state: OldContract =
+            near_sdk::borsh::from_slice(&near_sdk::env::storage_read(b"STATE").unwrap()).unwrap();
+        let mut launch_data_hashmap = HashMap::new();
+        for token in tokens {
+            let launch_data = old_state.launch_data.get(&token).unwrap();
+            launch_data_hashmap.insert(
+                token,
+                LaunchInfo {
+                    data: launch_data.clone(),
+                    launched_by: "slimedragon.near".parse().unwrap(),
+                },
+            );
+        }
+        let mut new_launch_data = LookupMap::new(StorageKey::LaunchData);
+        for (token, launch_info) in launch_data_hashmap {
+            new_launch_data.insert(token, launch_info);
+        }
+        Self {
+            launch_data: new_launch_data,
+            meme_id_counter: old_state.meme_id_counter,
+            fees_earned: old_state.fees_earned,
         }
     }
 
@@ -160,7 +202,7 @@ impl Contract {
         }
     }
 
-    pub fn get_launch_data(&self, token_account_id: AccountId) -> Option<&LaunchData> {
+    pub fn get_launch_data(&self, token_account_id: AccountId) -> Option<&LaunchInfo> {
         self.launch_data.get(&token_account_id)
     }
 
@@ -210,7 +252,13 @@ impl Contract {
                 .expect("Invalid ticker");
             if self
                 .launch_data
-                .insert(account_id.clone(), launch_data)
+                .insert(
+                    account_id.clone(),
+                    LaunchInfo {
+                        data: launch_data,
+                        launched_by: near_sdk::env::predecessor_account_id(),
+                    },
+                )
                 .is_some()
             {
                 panic!("Short account ID for this symbol is already taken");
@@ -233,7 +281,13 @@ impl Contract {
             .expect("Invalid ticker");
             if self
                 .launch_data
-                .insert(account_id.clone(), launch_data)
+                .insert(
+                    account_id.clone(),
+                    LaunchInfo {
+                        data: launch_data,
+                        launched_by: near_sdk::env::predecessor_account_id(),
+                    },
+                )
                 .is_some()
             {
                 panic!("Long account ID for this symbol is already taken. This is a bug.");
