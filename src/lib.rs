@@ -9,16 +9,16 @@ use near_sdk::{
 };
 
 const INTEAR_DEX_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
-const PLACH_POOL_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
+const PLACH_POOL_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(15); // 0.015 NEAR
 const FT_STORAGE_DEPOSIT: NearToken = NearToken::from_micronear(1250); // 0.00125 NEAR
 const OWN_STORAGE_EXPENSES: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
 
-// 0.02625 NEAR
+// 0.03250 NEAR
 const ID_COST: NearToken = NearToken::from_yoctonear(
     INTEAR_DEX_STORAGE_DEPOSIT.as_yoctonear()
         + PLACH_POOL_STORAGE_DEPOSIT.as_yoctonear()
         + OWN_STORAGE_EXPENSES.as_yoctonear()
-        + FT_STORAGE_DEPOSIT.as_yoctonear(),
+        + 2 * FT_STORAGE_DEPOSIT.as_yoctonear(),
 );
 const SHORT_ID_COST: NearToken = NearToken::from_near(1);
 
@@ -109,7 +109,7 @@ impl Contract {
             );
             let account_id = format!("{symbol_lower}.{}", near_sdk::env::current_account_id())
                 .parse::<AccountId>()
-                .expect("Invalid account ID to be created. Try using a shorter ticker.");
+                .expect("Invalid ticker");
             if self.launch_data.contains_key(&account_id) {
                 panic!("Short account ID for this symbol is already taken.");
             }
@@ -126,7 +126,7 @@ impl Contract {
                 near_sdk::env::current_account_id()
             )
             .parse::<AccountId>()
-            .expect("Invalid account ID to be created. Try using a longer ticker.")
+            .expect("Invalid ticker")
         }
     }
 
@@ -146,6 +146,7 @@ impl Contract {
         short_id: bool,
         fees: Option<Vec<FeeEntry>>,
         launch_data: LaunchData,
+        first_buy: Option<NearToken>,
     ) -> AccountId {
         launch_data.validate();
         let symbol_lower = symbol.to_lowercase();
@@ -162,7 +163,10 @@ impl Contract {
             ID_COST
         };
 
-        let Some(storage_deposit) = near_sdk::env::attached_deposit().checked_sub(cost) else {
+        let Some(storage_deposit) = near_sdk::env::attached_deposit()
+            .checked_sub(cost)
+            .and_then(|deposit| deposit.checked_sub(first_buy.unwrap_or_default()))
+        else {
             panic!("Insufficient deposit for launch cost. Attach at least {cost}.");
         };
 
@@ -173,7 +177,7 @@ impl Contract {
             );
             let account_id = format!("{symbol_lower}.{}", near_sdk::env::current_account_id())
                 .parse::<AccountId>()
-                .expect("Invalid account ID to be created. Try using a shorter ticker.");
+                .expect("Invalid ticker");
             if self
                 .launch_data
                 .insert(account_id.clone(), launch_data)
@@ -196,7 +200,7 @@ impl Contract {
                 near_sdk::env::current_account_id()
             )
             .parse::<AccountId>()
-            .expect("Invalid account ID to be created. Try using a longer ticker.");
+            .expect("Invalid ticker");
             if self
                 .launch_data
                 .insert(account_id.clone(), launch_data)
@@ -261,7 +265,7 @@ impl Contract {
                 "register_assets",
                 near_sdk::serde_json::json!({
                     "asset_ids": [
-                        format!("nep141:{account_id}")
+                        AssetId::Nep141(account_id.clone()),
                     ]
                 })
                 .to_string()
@@ -273,7 +277,7 @@ impl Contract {
                 "register_assets",
                 near_sdk::serde_json::json!({
                     "asset_ids": [
-                        format!("nep141:{account_id}"),
+                        AssetId::Nep141(account_id.clone()),
                     ],
                     "for": {
                         "Dex": PLACH_DEX_ID,
@@ -304,6 +308,17 @@ impl Contract {
                 Gas::from_tgas(10),
             )
             .function_call(
+                "storage_deposit",
+                near_sdk::serde_json::json!({
+                    "account_id": near_sdk::env::predecessor_account_id(),
+                    "registration_only": true,
+                })
+                .to_string()
+                .into_bytes(),
+                FT_STORAGE_DEPOSIT,
+                Gas::from_tgas(10),
+            )
+            .function_call(
                 "ft_transfer_call",
                 near_sdk::serde_json::json!({
                     "receiver_id": INTEAR_DEX_CONTRACT_ID,
@@ -317,41 +332,73 @@ impl Contract {
                 Gas::from_tgas(40),
             );
 
+        #[near(serializers=[borsh])]
+        struct CreatePoolArgs {
+            assets: (AssetId, AssetId),
+            fees: FeeConfiguration,
+            pool_type: PoolType,
+        }
+        let mut operations = vec![Operation::DexCall {
+            dex_id: PLACH_DEX_ID.to_string(),
+            method: "create_pool".to_string(),
+            args: Base64VecU8(
+                near_sdk::borsh::to_vec(&CreatePoolArgs {
+                    assets: (AssetId::Near, AssetId::Nep141(account_id.clone())),
+                    fees: FeeConfiguration::V2(V2FeeConfiguration {
+                        receivers: fees.unwrap_or_default(),
+                    }),
+                    pool_type: PoolType::LaunchV1 {
+                        phantom_liquidity_near: U128(PHANTOM_LIQUIDITY_NEAR.as_yoctonear()),
+                    },
+                })
+                .unwrap(),
+            ),
+            attached_assets: HashMap::from_iter([
+                (
+                    AssetId::Near,
+                    U128(PLACH_POOL_STORAGE_DEPOSIT.as_yoctonear()),
+                ),
+                (AssetId::Nep141(account_id.clone()), total_supply),
+            ]),
+        }];
+
+        if let Some(first_buy) = first_buy {
+            #[near(serializers=[borsh])]
+            struct SwapArgs {
+                pool_id: u32,
+            }
+            operations.extend([
+                Operation::SwapSimple {
+                    dex_id: PLACH_DEX_ID.to_string(),
+                    message: Base64VecU8(
+                        near_sdk::borsh::to_vec(&SwapArgs { pool_id: u32::MAX }).unwrap(),
+                    ),
+                    asset_in: AssetId::Near,
+                    asset_out: AssetId::Nep141(account_id.clone()),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
+                        first_buy.as_yoctonear(),
+                    ))),
+                    constraint: None,
+                },
+                Operation::Withdraw {
+                    asset_id: AssetId::Nep141(account_id.clone()),
+                    amount: WithdrawAmount::Full { at_least: None },
+                    to: Some(near_sdk::env::predecessor_account_id()),
+                    rescue_address: None,
+                },
+            ]);
+        }
+
         let create_pool_promise = Promise::new(INTEAR_DEX_CONTRACT_ID.parse().unwrap())
             .function_call(
                 "execute_operations",
                 near_sdk::serde_json::json!({
-                    "operations": [
-                        Operation::DexCall {
-                            dex_id: PLACH_DEX_ID.to_string(),
-                            method: "create_pool".to_string(),
-                            args: Base64VecU8(
-                                near_sdk::borsh::to_vec(&CreatePoolArgs {
-                                    assets: (AssetId::Near, AssetId::Nep141(account_id.clone())),
-                                    fees: FeeConfiguration::V2(V2FeeConfiguration {
-                                        receivers: fees.unwrap_or_default()
-                                    }),
-                                    pool_type: PoolType::LaunchV1 {
-                                        phantom_liquidity_near: U128(PHANTOM_LIQUIDITY_NEAR.as_yoctonear())
-                                    },
-                                })
-                                .unwrap(),
-                            ),
-                            attached_assets: HashMap::from_iter([
-                                (
-                                    "near".to_string(),
-                                    U128(PLACH_POOL_STORAGE_DEPOSIT.as_yoctonear()),
-                                ),
-                                (
-                                    format!("nep141:{account_id}").to_string(),
-                                    total_supply,
-                                ),
-                            ]),
-                        },
-                    ]
-                }).to_string().into_bytes(),
+                    "operations": operations,
+                })
+                .to_string()
+                .into_bytes(),
                 NearToken::from_yoctonear(1),
-                Gas::from_tgas(120),
+                Gas::from_tgas(200),
             );
 
         create_token_promise
@@ -371,23 +418,79 @@ pub enum Operation {
         dex_id: String,
         method: String,
         args: Base64VecU8,
-        attached_assets: HashMap<String, U128>,
+        attached_assets: HashMap<AssetId, U128>,
+    },
+    Withdraw {
+        asset_id: AssetId,
+        amount: WithdrawAmount,
+        to: Option<AccountId>,
+        /// If the withdrawal fails and current user doesn't have
+        /// a registerd balance in this asset, the assets will be
+        /// refunded to this address. It's required that either
+        /// the user address or rescue address is registered.
+        rescue_address: Option<AccountId>,
+    },
+    SwapSimple {
+        dex_id: String,
+        message: Base64VecU8,
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount: SwapOperationAmount,
+        /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
+        constraint: Option<U128>,
     },
 }
 
-#[near(serializers=[borsh])]
-struct CreatePoolArgs {
-    assets: (AssetId, AssetId),
-    fees: FeeConfiguration,
-    pool_type: PoolType,
+#[derive(near_sdk::serde::Serialize)]
+#[serde(crate = "near_sdk::serde")]
+pub enum SwapOperationAmount {
+    Amount(SwapRequestAmount),
+    OutputOfLastIn,
+    EntireBalanceIn,
+}
+
+#[derive(near_sdk::serde::Serialize)]
+#[serde(crate = "near_sdk::serde")]
+pub enum SwapRequestAmount {
+    ExactIn(U128),
+    ExactOut(U128),
+}
+
+#[derive(near_sdk::serde::Serialize)]
+#[serde(crate = "near_sdk::serde")]
+pub enum WithdrawAmount {
+    Full { at_least: Option<U128> },
+    Exact(U128),
+    PreviousSwapOutput,
 }
 
 #[near(serializers=[borsh])]
+#[derive(PartialEq, Eq, Hash)]
 pub enum AssetId {
     Near,
     Nep141(AccountId),
     Nep245(AccountId, String),
     Nep171(AccountId, String),
+}
+
+impl std::fmt::Display for AssetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Near => write!(f, "near"),
+            Self::Nep141(contract_id) => write!(f, "nep141:{contract_id}"),
+            Self::Nep245(contract_id, token_id) => write!(f, "nep245:{contract_id}:{token_id}"),
+            Self::Nep171(contract_id, token_id) => write!(f, "nep171:{contract_id}:{token_id}"),
+        }
+    }
+}
+
+impl near_sdk::serde::Serialize for AssetId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: near_sdk::serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
 }
 
 #[near(serializers=[borsh])]
