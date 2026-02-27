@@ -305,7 +305,7 @@ impl Contract {
                 .to_string()
                 .into_bytes(),
                 NearToken::ZERO,
-                Gas::from_tgas(10),
+                Gas::from_tgas(35),
             );
 
         let prepare_dex_promise = Promise::new(INTEAR_DEX_CONTRACT_ID.parse().unwrap())
