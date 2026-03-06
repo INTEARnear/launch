@@ -468,7 +468,9 @@ impl Contract {
         account_id
     }
 
+    #[payable]
     pub fn edit_token(&mut self, token_account_id: AccountId, launch_data: LaunchData) {
+        let attached_deposit = near_sdk::env::attached_deposit();
         let Some(launch_info) = self.launch_data.get_mut(&token_account_id) else {
             panic!("Token not found");
         };
@@ -476,7 +478,24 @@ impl Contract {
             launch_info.launched_by == near_sdk::env::predecessor_account_id(),
             "Only token creator can edit own tokens"
         );
+        let storage_usage_before = near_sdk::env::storage_usage();
         launch_info.data = launch_data;
+        self.launch_data.flush();
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_usage_change = storage_usage_after.saturating_sub(storage_usage_before) as u128;
+        let storage_change_cost = NearToken::from_yoctonear(
+            storage_usage_change
+                .checked_mul(near_sdk::env::storage_byte_cost().as_yoctonear())
+                .unwrap(),
+        );
+        let Some(leftover) = attached_deposit.checked_sub(storage_change_cost) else {
+            panic!("Insufficient deposit for storage cost. Attach at least {storage_change_cost}.");
+        };
+        if !leftover.is_zero() {
+            Promise::new(near_sdk::env::predecessor_account_id())
+                .transfer(leftover)
+                .detach();
+        }
     }
 }
 
