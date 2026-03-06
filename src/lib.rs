@@ -467,6 +467,17 @@ impl Contract {
 
         account_id
     }
+
+    pub fn edit_token(&mut self, token_account_id: AccountId, launch_data: LaunchData) {
+        let Some(launch_info) = self.launch_data.get_mut(&token_account_id) else {
+            panic!("Token not found");
+        };
+        require!(
+            launch_info.launched_by == near_sdk::env::predecessor_account_id(),
+            "Only token creator can edit own tokens"
+        );
+        launch_info.data = launch_data;
+    }
 }
 
 #[derive(near_sdk::serde::Serialize)]
