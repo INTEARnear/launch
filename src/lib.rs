@@ -209,7 +209,7 @@ impl Contract {
         decimals: u8,
         total_supply: U128,
         short_id: bool,
-        fees: Option<Vec<FeeEntry>>,
+        fees: Option<Vec<FeeEntryReference>>,
         launch_data: LaunchData,
         first_buy: Option<NearToken>,
     ) -> AccountId {
@@ -235,7 +235,7 @@ impl Contract {
             panic!("Insufficient deposit for launch cost. Attach at least {cost}.");
         };
 
-        let account_id = if short_id {
+        let new_token_account_id = if short_id {
             require!(
                 !symbol.contains("-"),
                 "Symbol cannot contain hyphens when using a short ID."
@@ -305,7 +305,7 @@ impl Contract {
             self.fees_earned = self.fees_earned.checked_add(SHORT_ID_COST).unwrap();
         }
 
-        let create_token_promise = Promise::new(account_id.clone())
+        let create_token_promise = Promise::new(new_token_account_id.clone())
             .create_account()
             .use_global_contract(
                 <[u8; 32]>::try_from(near_sdk::bs58::decode(TOKEN_CODE_HASH).into_vec().unwrap())
@@ -344,7 +344,7 @@ impl Contract {
                 "register_assets",
                 near_sdk::serde_json::json!({
                     "asset_ids": [
-                        AssetId::Nep141(account_id.clone()),
+                        AssetId::Nep141(new_token_account_id.clone()),
                     ]
                 })
                 .to_string()
@@ -356,7 +356,7 @@ impl Contract {
                 "register_assets",
                 near_sdk::serde_json::json!({
                     "asset_ids": [
-                        AssetId::Nep141(account_id.clone()),
+                        AssetId::Nep141(new_token_account_id.clone()),
                     ],
                     "for": {
                         "Dex": PLACH_DEX_ID,
@@ -374,7 +374,7 @@ impl Contract {
                 Gas::from_tgas(5),
             );
 
-        let transfer_to_dex_promise = Promise::new(account_id.clone())
+        let transfer_to_dex_promise = Promise::new(new_token_account_id.clone())
             .function_call(
                 "storage_deposit",
                 near_sdk::serde_json::json!({
@@ -422,9 +422,26 @@ impl Contract {
             method: "create_pool".to_string(),
             args: Base64VecU8(
                 near_sdk::borsh::to_vec(&CreatePoolArgs {
-                    assets: (AssetId::Near, AssetId::Nep141(account_id.clone())),
+                    assets: (AssetId::Near, AssetId::Nep141(new_token_account_id.clone())),
                     fees: FeeConfiguration::V2(V2FeeConfiguration {
-                        receivers: fees.unwrap_or_default(),
+                        receivers: fees
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(receiver, amount)| {
+                                (
+                                    match receiver {
+                                        FeeReceiverReference::Account(receiver_account_id) => {
+                                            FeeReceiver::Account(receiver_account_id)
+                                        }
+                                        FeeReceiverReference::Pool => FeeReceiver::Pool,
+                                        FeeReceiverReference::Holders => {
+                                            FeeReceiver::Community(new_token_account_id.clone())
+                                        }
+                                    },
+                                    amount,
+                                )
+                            })
+                            .collect(),
                     }),
                     pool_type: PoolType::LaunchV1 {
                         phantom_liquidity_near: U128(PHANTOM_LIQUIDITY_NEAR.as_yoctonear()),
@@ -437,7 +454,7 @@ impl Contract {
                     AssetId::Near,
                     U128(PLACH_POOL_STORAGE_DEPOSIT.as_yoctonear()),
                 ),
-                (AssetId::Nep141(account_id.clone()), total_supply),
+                (AssetId::Nep141(new_token_account_id.clone()), total_supply),
             ]),
         }];
 
@@ -453,14 +470,14 @@ impl Contract {
                         near_sdk::borsh::to_vec(&SwapArgs { pool_id: u32::MAX }).unwrap(),
                     ),
                     asset_in: AssetId::Near,
-                    asset_out: AssetId::Nep141(account_id.clone()),
+                    asset_out: AssetId::Nep141(new_token_account_id.clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
                         first_buy.as_yoctonear(),
                     ))),
                     constraint: None,
                 },
                 Operation::Withdraw {
-                    asset_id: AssetId::Nep141(account_id.clone()),
+                    asset_id: AssetId::Nep141(new_token_account_id.clone()),
                     amount: WithdrawAmount::Full { at_least: None },
                     to: Some(near_sdk::env::predecessor_account_id()),
                     rescue_address: None,
@@ -490,7 +507,7 @@ impl Contract {
             .then(create_pool_promise)
             .detach();
 
-        account_id
+        new_token_account_id
     }
 
     #[payable]
@@ -626,24 +643,34 @@ enum PoolType {
     PublicV2,
 }
 
-#[near(serializers=[borsh, json])]
+#[near(serializers=[borsh])]
 enum FeeConfiguration {
     V1(/* not supported */),
     V2(V2FeeConfiguration),
 }
 
+pub type FeeEntryReference = (FeeReceiverReference, FeeAmount);
 pub type FeeEntry = (FeeReceiver, FeeAmount);
 
-#[near(serializers=[borsh, json])]
+#[near(serializers=[borsh])]
 struct V2FeeConfiguration {
     receivers: Vec<FeeEntry>,
 }
 
-#[near(serializers=[borsh, json])]
+#[near(serializers=[json])]
+#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
+pub enum FeeReceiverReference {
+    Account(AccountId),
+    Pool,
+    Holders,
+}
+
+#[near(serializers=[borsh])]
 #[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
 pub enum FeeReceiver {
     Account(AccountId),
     Pool,
+    Community(AccountId),
 }
 
 #[near(serializers=[borsh, json])]
