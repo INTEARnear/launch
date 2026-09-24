@@ -8,7 +8,7 @@ use near_sdk::{
     store::{IterableMap, LookupMap},
 };
 
-const INTEAR_DEX_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
+const INTEAR_DEX_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
 const PLACH_POOL_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(15); // 0.015 NEAR
 const FT_STORAGE_DEPOSIT: NearToken = NearToken::from_micronear(1250); // 0.00125 NEAR
 const OWN_STORAGE_EXPENSES: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
