@@ -22,23 +22,23 @@ const ID_COST: NearToken = NearToken::from_yoctonear(
 );
 const SHORT_ID_COST: NearToken = NearToken::from_near(1);
 
-const TOKEN_CODE_HASH: &str = "8D1NEU2NC2hKhdtCkHyyAz2KVmVXRazm9ZQMC27D97jF";
+const TOKEN_CODE_HASH: &str = "GVFRDj8DdqUvNFwEHfAR14c8GvKU2ds8qCzCMQ88ajhT";
 const INTEAR_DEX_CONTRACT_ID: &str = "dex.intear.near";
 const PLACH_DEX_ID: &str = "slimedragon.near/xyk";
-const PHANTOM_LIQUIDITY_NEAR: NearToken = NearToken::from_near(300);
+const PHANTOM_LIQUIDITY_NEAR: NearToken = NearToken::from_near(888);
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone)]
-pub struct LaunchInfoV2 {
+pub struct LaunchInfo {
     #[serde(flatten)]
-    data: LaunchDataV2,
+    data: LaunchData,
     launched_by: AccountId,
     launched_at_ns: Timestamp,
 }
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone)]
-pub struct LaunchDataV2 {
+pub struct LaunchData {
     telegram: Option<String>,
     x: Option<String>,
     twitch: Option<String>,
@@ -46,46 +46,7 @@ pub struct LaunchDataV2 {
     description: Option<String>,
 }
 
-#[near(serializers=[borsh])]
-#[derive(Clone)]
-struct LaunchInfoV1 {
-    data: LaunchDataV1,
-    launched_by: AccountId,
-    launched_at_ns: Timestamp,
-}
-
-#[near(serializers=[borsh])]
-#[derive(Clone)]
-struct LaunchDataV1 {
-    telegram: Option<String>,
-    x: Option<String>,
-    website: Option<String>,
-    description: Option<String>,
-}
-
-impl From<LaunchDataV1> for LaunchDataV2 {
-    fn from(data: LaunchDataV1) -> Self {
-        Self {
-            telegram: data.telegram,
-            x: data.x,
-            website: data.website,
-            description: data.description,
-            twitch: None,
-        }
-    }
-}
-
-impl From<LaunchInfoV1> for LaunchInfoV2 {
-    fn from(info: LaunchInfoV1) -> Self {
-        Self {
-            data: info.data.into(),
-            launched_by: info.launched_by,
-            launched_at_ns: info.launched_at_ns,
-        }
-    }
-}
-
-impl LaunchDataV2 {
+impl LaunchData {
     fn validate(&self) {
         const MAX_URL_LENGTH: usize = 50;
         require!(
@@ -155,15 +116,14 @@ pub enum IntearLaunchEvent {
     TokenEdited {
         token_account_id: AccountId,
         edited_by: AccountId,
-        launch_data: LaunchDataV2,
+        launch_data: LaunchData,
     },
 }
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Contract {
-    launch_data_v1: LookupMap<AccountId, LaunchInfoV1>,
-    launch_data_v2: IterableMap<AccountId, LaunchInfoV2>,
+    launch_data: IterableMap<AccountId, LaunchInfo>,
     meme_id_counter: LookupMap<String, u64>,
     fees_earned: NearToken,
 }
@@ -173,8 +133,7 @@ pub struct Contract {
 enum StorageKey {
     LegacyLaunchData,
     IdCounter,
-    LaunchDataV1,
-    LaunchDataV2,
+    LaunchData,
 }
 
 #[near]
@@ -182,29 +141,9 @@ impl Contract {
     #[init]
     pub fn new() -> Self {
         Self {
-            launch_data_v1: LookupMap::new(StorageKey::LaunchDataV1),
-            launch_data_v2: IterableMap::new(StorageKey::LaunchDataV2),
+            launch_data: IterableMap::new(StorageKey::LaunchData),
             meme_id_counter: LookupMap::new(StorageKey::IdCounter),
             fees_earned: Default::default(),
-        }
-    }
-
-    #[init(ignore_state)]
-    pub fn migrate() -> Self {
-        #[near(serializers=[borsh])]
-        struct OldState {
-            launch_data: LookupMap<AccountId, LaunchInfoV1>,
-            meme_id_counter: LookupMap<String, u64>,
-            fees_earned: NearToken,
-        }
-
-        let old_state = near_sdk::env::state_read::<OldState>().expect("Failed to read old state");
-
-        Self {
-            launch_data_v1: old_state.launch_data,
-            launch_data_v2: IterableMap::new(StorageKey::LaunchDataV2),
-            meme_id_counter: old_state.meme_id_counter,
-            fees_earned: old_state.fees_earned,
         }
     }
 
@@ -236,9 +175,7 @@ impl Contract {
             let account_id = format!("{symbol_lower}.{}", near_sdk::env::current_account_id())
                 .parse::<AccountId>()
                 .expect("Invalid ticker");
-            if self.launch_data_v2.contains_key(&account_id)
-                || self.launch_data_v1.contains_key(&account_id)
-            {
+            if self.launch_data.contains_key(&account_id) {
                 panic!("Short account ID for this symbol is already taken.");
             }
             account_id
@@ -258,16 +195,8 @@ impl Contract {
         }
     }
 
-    pub fn get_launch_data(&self, token_account_id: AccountId) -> Option<LaunchInfoV2> {
-        self.launch_data_v2
-            .get(&token_account_id)
-            .cloned()
-            .or_else(|| {
-                self.launch_data_v1
-                    .get(&token_account_id)
-                    .cloned()
-                    .map(LaunchInfoV2::from)
-            })
+    pub fn get_launch_data(&self, token_account_id: AccountId) -> Option<LaunchInfo> {
+        self.launch_data.get(&token_account_id).cloned()
     }
 
     #[payable]
@@ -281,7 +210,7 @@ impl Contract {
         total_supply: U128,
         short_id: bool,
         fees: Option<Vec<FeeEntry>>,
-        launch_data: LaunchDataV2,
+        launch_data: LaunchData,
         first_buy: Option<NearToken>,
     ) -> AccountId {
         launch_data.validate();
@@ -315,10 +244,10 @@ impl Contract {
                 .parse::<AccountId>()
                 .expect("Invalid ticker");
             if self
-                .launch_data_v2
+                .launch_data
                 .insert(
                     account_id.clone(),
-                    LaunchInfoV2 {
+                    LaunchInfo {
                         data: launch_data,
                         launched_by: near_sdk::env::predecessor_account_id(),
                         launched_at_ns: near_sdk::env::block_timestamp(),
@@ -345,10 +274,10 @@ impl Contract {
             .parse::<AccountId>()
             .expect("Invalid ticker");
             if self
-                .launch_data_v2
+                .launch_data
                 .insert(
                     account_id.clone(),
-                    LaunchInfoV2 {
+                    LaunchInfo {
                         data: launch_data,
                         launched_by: near_sdk::env::predecessor_account_id(),
                         launched_at_ns: near_sdk::env::block_timestamp(),
@@ -361,7 +290,7 @@ impl Contract {
             account_id
         };
 
-        self.launch_data_v2.flush();
+        self.launch_data.flush();
         self.meme_id_counter.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
         let storage_usage = storage_usage_after
@@ -565,10 +494,10 @@ impl Contract {
     }
 
     #[payable]
-    pub fn edit_token(&mut self, token_account_id: AccountId, launch_data: LaunchDataV2) {
+    pub fn edit_token(&mut self, token_account_id: AccountId, launch_data: LaunchData) {
         launch_data.validate();
         let attached_deposit = near_sdk::env::attached_deposit();
-        let Some(launch_info) = self.launch_data_v2.get_mut(&token_account_id) else {
+        let Some(launch_info) = self.launch_data.get_mut(&token_account_id) else {
             panic!("Token not found");
         };
         require!(
@@ -578,7 +507,7 @@ impl Contract {
         let storage_usage_before = near_sdk::env::storage_usage();
         launch_info.data = launch_data;
         let edited_launch_data = launch_info.data.clone();
-        self.launch_data_v2.flush();
+        self.launch_data.flush();
         IntearLaunchEvent::TokenEdited {
             token_account_id,
             edited_by: near_sdk::env::predecessor_account_id(),
@@ -699,7 +628,6 @@ enum PoolType {
 
 #[near(serializers=[borsh, json])]
 enum FeeConfiguration {
-    V1(/* not supported */),
     V2(V2FeeConfiguration),
 }
 
