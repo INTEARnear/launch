@@ -628,6 +628,7 @@ enum PoolType {
 
 #[near(serializers=[borsh, json])]
 enum FeeConfiguration {
+    V1(/* not supported */),
     V2(V2FeeConfiguration),
 }
 
