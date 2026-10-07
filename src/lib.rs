@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 
-use near_contract_standards::fungible_token::metadata::FungibleTokenMetadata;
+use near_contract_standards::fungible_token::{
+    metadata::FungibleTokenMetadata, receiver::FungibleTokenReceiver,
+};
 use near_sdk::{
-    AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise, Timestamp,
+    AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
+    PromiseOrValue, Timestamp,
     json_types::{Base64VecU8, U128},
     near, require,
     store::{IterableMap, LookupMap},
@@ -25,7 +28,28 @@ const SHORT_ID_COST: NearToken = NearToken::from_near(1);
 const TOKEN_CODE_HASH: &str = "GVFRDj8DdqUvNFwEHfAR14c8GvKU2ds8qCzCMQ88ajhT";
 const INTEAR_DEX_CONTRACT_ID: &str = "dex.intear.near";
 const PLACH_DEX_ID: &str = "slimedragon.near/xyk";
-const PHANTOM_LIQUIDITY_NEAR: NearToken = NearToken::from_near(888);
+const USDC_TOKEN_ID: &str = "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
+const TEAR_TOKEN_ID: &str = "token.intear.near";
+
+struct QuoteTokenSettings {
+    phantom_liquidity: u128,
+    /// Prevent storage griefing
+    min_first_buy_deposit: u128,
+}
+
+fn quote_token_settings(quote_token: &AccountId) -> QuoteTokenSettings {
+    match quote_token.as_str() {
+        USDC_TOKEN_ID => QuoteTokenSettings {
+            phantom_liquidity: 1_500 * 10u128.pow(6),
+            min_first_buy_deposit: 10u128.pow(6),
+        },
+        TEAR_TOKEN_ID => QuoteTokenSettings {
+            phantom_liquidity: 200_000 * 10u128.pow(24),
+            min_first_buy_deposit: 1_000 * 10u128.pow(24),
+        },
+        _ => panic!("{quote_token} can't be a quote token."),
+    }
+}
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone)]
@@ -126,6 +150,7 @@ pub struct Contract {
     launch_data: IterableMap<AccountId, LaunchInfo>,
     meme_id_counter: LookupMap<String, u64>,
     fees_earned: NearToken,
+    quote_token_balances: LookupMap<(AccountId, AccountId), U128>,
 }
 
 #[near(serializers=[borsh])]
@@ -134,6 +159,7 @@ enum StorageKey {
     LegacyLaunchData,
     IdCounter,
     LaunchData,
+    QuoteTokenBalances,
 }
 
 #[near]
@@ -144,6 +170,74 @@ impl Contract {
             launch_data: IterableMap::new(StorageKey::LaunchData),
             meme_id_counter: LookupMap::new(StorageKey::IdCounter),
             fees_earned: Default::default(),
+            quote_token_balances: LookupMap::new(StorageKey::QuoteTokenBalances),
+        }
+    }
+
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        #[near(serializers=[borsh])]
+        struct OldContract {
+            launch_data: IterableMap<AccountId, LaunchInfo>,
+            meme_id_counter: LookupMap<String, u64>,
+            fees_earned: NearToken,
+        }
+        let old_state: OldContract = near_sdk::env::state_read().expect("Failed to read old state");
+        Self {
+            launch_data: old_state.launch_data,
+            meme_id_counter: old_state.meme_id_counter,
+            fees_earned: old_state.fees_earned,
+            quote_token_balances: LookupMap::new(StorageKey::QuoteTokenBalances),
+        }
+    }
+
+    pub fn get_quote_token_balance(&self, account_id: AccountId, quote_token: AccountId) -> U128 {
+        self.quote_token_balances
+            .get(&(account_id, quote_token))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    #[payable]
+    pub fn withdraw_quote_token(&mut self, quote_token: AccountId) -> Promise {
+        near_sdk::assert_one_yocto();
+        let account_id = near_sdk::env::predecessor_account_id();
+        let Some(amount) = self
+            .quote_token_balances
+            .remove(&(account_id.clone(), quote_token.clone()))
+        else {
+            panic!("No {quote_token} deposited.");
+        };
+        Promise::new(quote_token.clone())
+            .function_call(
+                "ft_transfer",
+                near_sdk::serde_json::json!({
+                    "receiver_id": account_id,
+                    "amount": amount,
+                })
+                .to_string()
+                .into_bytes(),
+                NearToken::from_yoctonear(1),
+                Gas::from_tgas(10),
+            )
+            .then(
+                Self::ext(near_sdk::env::current_account_id())
+                    .with_static_gas(Gas::from_tgas(5))
+                    .on_quote_token_withdrawn(account_id, quote_token, amount),
+            )
+    }
+
+    #[private]
+    pub fn on_quote_token_withdrawn(
+        &mut self,
+        account_id: AccountId,
+        quote_token: AccountId,
+        amount: U128,
+        #[callback_result] transfer_result: Result<(), PromiseError>,
+    ) {
+        if transfer_result.is_err() {
+            self.internal_credit_quote_token(account_id, quote_token, amount);
         }
     }
 
@@ -211,9 +305,49 @@ impl Contract {
         short_id: bool,
         fees: Option<Vec<FeeEntryReference>>,
         launch_data: LaunchData,
-        first_buy: Option<NearToken>,
+        first_buy: Option<U128>,
+        quote_token: Option<AccountId>,
     ) -> AccountId {
         launch_data.validate();
+        let (quote_asset, phantom_liquidity) = match &quote_token {
+            None => (AssetId::Near, NearToken::from_near(300).as_yoctonear()),
+            Some(quote_token) => (
+                AssetId::Nep141(quote_token.clone()),
+                quote_token_settings(quote_token).phantom_liquidity,
+            ),
+        };
+        let first_buy_near = if quote_asset == AssetId::Near {
+            first_buy.map(|amount| NearToken::from_yoctonear(amount.0))
+        } else {
+            None
+        };
+        if let (Some(quote_token), Some(first_buy)) = (&quote_token, first_buy) {
+            let balance_key = (near_sdk::env::predecessor_account_id(), quote_token.clone());
+            let Some(balance) = self.quote_token_balances.get_mut(&balance_key) else {
+                panic!("Deposit {quote_token} with ft_transfer_call for the first buy first.");
+            };
+            let Some(balance_left) = balance.0.checked_sub(first_buy.0) else {
+                panic!(
+                    "First buy is {} of {quote_token}, but only {} is deposited.",
+                    first_buy.0, balance.0
+                );
+            };
+            if balance_left == 0 {
+                self.quote_token_balances.remove(&balance_key);
+            } else {
+                balance.0 = balance_left;
+            }
+            self.quote_token_balances.flush();
+        }
+        if fees.as_ref().is_some_and(|fees| {
+            fees.iter()
+                .any(|(receiver, _)| *receiver == FeeReceiverReference::Holders)
+        }) {
+            require!(
+                quote_asset == AssetId::Near,
+                "Holder fees are only supported in launches quoted in NEAR."
+            );
+        }
         let symbol_lower = symbol.to_lowercase();
 
         let own_storage_allowed = u64::try_from(
@@ -230,7 +364,7 @@ impl Contract {
 
         let Some(storage_deposit) = near_sdk::env::attached_deposit()
             .checked_sub(cost)
-            .and_then(|deposit| deposit.checked_sub(first_buy.unwrap_or_default()))
+            .and_then(|deposit| deposit.checked_sub(first_buy_near.unwrap_or_default()))
         else {
             panic!("Insufficient deposit for launch cost. Attach at least {cost}.");
         };
@@ -345,6 +479,7 @@ impl Contract {
                 near_sdk::serde_json::json!({
                     "asset_ids": [
                         AssetId::Nep141(new_token_account_id.clone()),
+                        quote_asset.clone(),
                     ]
                 })
                 .to_string()
@@ -357,6 +492,7 @@ impl Contract {
                 near_sdk::serde_json::json!({
                     "asset_ids": [
                         AssetId::Nep141(new_token_account_id.clone()),
+                        quote_asset.clone(),
                     ],
                     "for": {
                         "Dex": PLACH_DEX_ID,
@@ -422,7 +558,10 @@ impl Contract {
             method: "create_pool".to_string(),
             args: Base64VecU8(
                 near_sdk::borsh::to_vec(&CreatePoolArgs {
-                    assets: (AssetId::Near, AssetId::Nep141(new_token_account_id.clone())),
+                    assets: (
+                        quote_asset.clone(),
+                        AssetId::Nep141(new_token_account_id.clone()),
+                    ),
                     fees: FeeConfiguration::V2(V2FeeConfiguration {
                         receivers: fees
                             .unwrap_or_default()
@@ -443,8 +582,8 @@ impl Contract {
                             })
                             .collect(),
                     }),
-                    pool_type: PoolType::LaunchV1 {
-                        phantom_liquidity_near: U128(PHANTOM_LIQUIDITY_NEAR.as_yoctonear()),
+                    pool_type: PoolType::LaunchV2 {
+                        phantom_liquidity: U128(phantom_liquidity),
                     },
                 })
                 .unwrap(),
@@ -469,11 +608,9 @@ impl Contract {
                     message: Base64VecU8(
                         near_sdk::borsh::to_vec(&SwapArgs { pool_id: u32::MAX }).unwrap(),
                     ),
-                    asset_in: AssetId::Near,
+                    asset_in: quote_asset,
                     asset_out: AssetId::Nep141(new_token_account_id.clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
-                        first_buy.as_yoctonear(),
-                    ))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(first_buy)),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -493,19 +630,33 @@ impl Contract {
                 })
                 .to_string()
                 .into_bytes(),
-                if let Some(first_buy) = first_buy {
-                    first_buy
-                } else {
-                    NearToken::from_yoctonear(1)
-                },
+                first_buy_near.unwrap_or(NearToken::from_yoctonear(1)),
                 Gas::from_tgas(150),
             );
 
-        create_token_promise
+        let launch_promise = create_token_promise
             .then(prepare_dex_promise)
-            .then(transfer_to_dex_promise)
-            .then(create_pool_promise)
-            .detach();
+            .then(transfer_to_dex_promise);
+        let launch_promise = match (quote_token, first_buy) {
+            (Some(quote_token), Some(first_buy)) => {
+                let deposit_first_buy_promise = Promise::new(quote_token).function_call(
+                    "ft_transfer_call",
+                    near_sdk::serde_json::json!({
+                        "receiver_id": INTEAR_DEX_CONTRACT_ID,
+                        "amount": first_buy,
+                        "memo": null,
+                        "msg": "",
+                    })
+                    .to_string()
+                    .into_bytes(),
+                    NearToken::from_yoctonear(1),
+                    Gas::from_tgas(30),
+                );
+                launch_promise.then(deposit_first_buy_promise)
+            }
+            _ => launch_promise,
+        };
+        launch_promise.then(create_pool_promise).detach();
 
         new_token_account_id
     }
@@ -546,6 +697,41 @@ impl Contract {
                 .transfer(leftover)
                 .detach();
         }
+    }
+}
+
+#[near]
+impl FungibleTokenReceiver for Contract {
+    /// Takes quote tokens for first buys of later launches
+    fn ft_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        amount: U128,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        let quote_token = near_sdk::env::predecessor_account_id();
+        let min_first_buy_deposit = quote_token_settings(&quote_token).min_first_buy_deposit;
+        require!(msg.is_empty(), "msg must be empty.");
+        if amount.0 < min_first_buy_deposit {
+            panic!("Deposit at least {min_first_buy_deposit} of {quote_token}.");
+        }
+        self.internal_credit_quote_token(sender_id, quote_token, amount);
+        PromiseOrValue::Value(U128(0))
+    }
+}
+
+impl Contract {
+    fn internal_credit_quote_token(
+        &mut self,
+        account_id: AccountId,
+        quote_token: AccountId,
+        amount: U128,
+    ) {
+        let balance = self
+            .quote_token_balances
+            .entry((account_id, quote_token))
+            .or_default();
+        balance.0 = balance.0.checked_add(amount.0).unwrap();
     }
 }
 
@@ -603,7 +789,7 @@ pub enum WithdrawAmount {
 }
 
 #[near(serializers=[borsh])]
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub enum AssetId {
     Near,
     Nep141(AccountId),
@@ -635,12 +821,13 @@ impl near_sdk::serde::Serialize for AssetId {
 enum PoolType {
     PrivateLatest,
     PublicLatest,
-    LaunchLatest { phantom_liquidity_near: U128 },
+    LaunchLatest { phantom_liquidity: U128 },
     LaunchV1 { phantom_liquidity_near: U128 },
     PrivateV1,
     PublicV1,
     PrivateV2,
     PublicV2,
+    LaunchV2 { phantom_liquidity: U128 },
 }
 
 #[near(serializers=[borsh])]
