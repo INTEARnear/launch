@@ -650,7 +650,7 @@ impl Contract {
                     .to_string()
                     .into_bytes(),
                     NearToken::from_yoctonear(1),
-                    Gas::from_tgas(30),
+                    Gas::from_tgas(50),
                 );
                 launch_promise.then(deposit_first_buy_promise)
             }

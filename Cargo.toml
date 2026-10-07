@@ -3,7 +3,6 @@ name = "intear-launch"
 description = "cargo-near-new-project-description"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.86"
 repository = "https://github.com/INTEARnear/launch"
 license = "MIT"
 
@@ -11,8 +10,8 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [package.metadata.near.reproducible_build]
-image = "sourcescan/cargo-near:0.19.0-rust-1.86.0"
-image_digest = "sha256:772638e343baeeea24e49062c7d424274f3441452cc06ce97fc4e5695b19fecc"
+image = "sourcescan/cargo-near:0.22.0-rust-1.99.0"
+image_digest = "sha256:51ab40efd798eae26c0dc71180909303f10bb4988b15ce3a18522c5be06e277e"
 passed_env = []
 container_build_command = [
     "cargo",
@@ -23,8 +22,8 @@ container_build_command = [
 ]
 
 [dependencies]
-near-sdk = { version = "5.24", features = ["global-contracts"] }
-near-contract-standards = "5.24"
+near-sdk = { version = "5.29", features = ["global-contracts"] }
+near-contract-standards = "5.29"
 
 [profile.release]
 codegen-units = 1
