@@ -24,6 +24,8 @@ container_build_command = [
 [dependencies]
 near-sdk = { version = "5.29", features = ["global-contracts"] }
 near-contract-standards = "5.29"
+intear-dex-types = { git = "https://github.com/INTEARnear/dex", features = ["json"] }
+xyk-dex-types = { git = "https://github.com/INTEARnear/dex" }
 
 [profile.release]
 codegen-units = 1

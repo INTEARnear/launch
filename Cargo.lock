@@ -447,11 +447,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "intear-dex-types"
+version = "0.1.0"
+source = "git+https://github.com/INTEARnear/dex#8a092815571b2a9708e9c557755e634e6c99323f"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
 name = "intear-launch"
 version = "0.1.0"
 dependencies = [
+ "intear-dex-types",
  "near-contract-standards",
  "near-sdk",
+ "xyk-dex-types",
 ]
 
 [[package]]
@@ -1237,6 +1247,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "xyk-dex-types"
+version = "0.1.0"
+source = "git+https://github.com/INTEARnear/dex#8a092815571b2a9708e9c557755e634e6c99323f"
+dependencies = [
+ "intear-dex-types",
+ "near-sdk",
 ]
 
 [[package]]

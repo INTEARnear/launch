@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use intear_dex_types::{
+    AssetId, Operation, SwapOperationAmount, SwapRequestAmount, WithdrawAmount,
+};
 use near_contract_standards::fungible_token::{
     metadata::FungibleTokenMetadata, receiver::FungibleTokenReceiver,
 };
@@ -9,6 +12,10 @@ use near_sdk::{
     json_types::{Base64VecU8, U128},
     near, require,
     store::{IterableMap, LookupMap},
+};
+use xyk_dex_types::{
+    CreatePoolArgs, FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeReceiver, PoolType,
+    SwapArgs, SwapRoute, V2FeeConfiguration,
 };
 
 const INTEAR_DEX_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(10); // 0.01 NEAR
@@ -170,24 +177,6 @@ impl Contract {
             launch_data: IterableMap::new(StorageKey::LaunchData),
             meme_id_counter: LookupMap::new(StorageKey::IdCounter),
             fees_earned: Default::default(),
-            quote_token_balances: LookupMap::new(StorageKey::QuoteTokenBalances),
-        }
-    }
-
-    #[private]
-    #[init(ignore_state)]
-    pub fn migrate() -> Self {
-        #[near(serializers=[borsh])]
-        struct OldContract {
-            launch_data: IterableMap<AccountId, LaunchInfo>,
-            meme_id_counter: LookupMap<String, u64>,
-            fees_earned: NearToken,
-        }
-        let old_state: OldContract = near_sdk::env::state_read().expect("Failed to read old state");
-        Self {
-            launch_data: old_state.launch_data,
-            meme_id_counter: old_state.meme_id_counter,
-            fees_earned: old_state.fees_earned,
             quote_token_balances: LookupMap::new(StorageKey::QuoteTokenBalances),
         }
     }
@@ -547,14 +536,8 @@ impl Contract {
                 Gas::from_tgas(40),
             );
 
-        #[near(serializers=[borsh])]
-        struct CreatePoolArgs {
-            assets: (AssetId, AssetId),
-            fees: FeeConfiguration,
-            pool_type: PoolType,
-        }
         let mut operations = vec![Operation::DexCall {
-            dex_id: PLACH_DEX_ID.to_string(),
+            dex_id: PLACH_DEX_ID.parse().unwrap(),
             method: "create_pool".to_string(),
             args: Base64VecU8(
                 near_sdk::borsh::to_vec(&CreatePoolArgs {
@@ -585,6 +568,7 @@ impl Contract {
                     pool_type: PoolType::LaunchV2 {
                         phantom_liquidity: U128(phantom_liquidity),
                     },
+                    initial_liquidity: None,
                 })
                 .unwrap(),
             ),
@@ -598,15 +582,18 @@ impl Contract {
         }];
 
         if let Some(first_buy) = first_buy {
-            #[near(serializers=[borsh])]
-            struct SwapArgs {
-                pool_id: u32,
-            }
             operations.extend([
                 Operation::SwapSimple {
-                    dex_id: PLACH_DEX_ID.to_string(),
+                    dex_id: PLACH_DEX_ID.parse().unwrap(),
                     message: Base64VecU8(
-                        near_sdk::borsh::to_vec(&SwapArgs { pool_id: u32::MAX }).unwrap(),
+                        near_sdk::borsh::to_vec(&SwapArgs {
+                            routes: vec![SwapRoute {
+                                fraction: FULL_SPLIT_FRACTION,
+                                pool_ids: vec![u32::MAX],
+                            }],
+                            fee_discount: None,
+                        })
+                        .unwrap(),
                     ),
                     asset_in: quote_asset,
                     asset_out: AssetId::Nep141(new_token_account_id.clone()),
@@ -735,115 +722,6 @@ impl Contract {
     }
 }
 
-#[derive(near_sdk::serde::Serialize)]
-#[serde(crate = "near_sdk::serde")]
-pub enum Operation {
-    DexCall {
-        dex_id: String,
-        method: String,
-        args: Base64VecU8,
-        attached_assets: HashMap<AssetId, U128>,
-    },
-    Withdraw {
-        asset_id: AssetId,
-        amount: WithdrawAmount,
-        to: Option<AccountId>,
-        /// If the withdrawal fails and current user doesn't have
-        /// a registerd balance in this asset, the assets will be
-        /// refunded to this address. It's required that either
-        /// the user address or rescue address is registered.
-        rescue_address: Option<AccountId>,
-    },
-    SwapSimple {
-        dex_id: String,
-        message: Base64VecU8,
-        asset_in: AssetId,
-        asset_out: AssetId,
-        amount: SwapOperationAmount,
-        /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
-        constraint: Option<U128>,
-    },
-}
-
-#[derive(near_sdk::serde::Serialize)]
-#[serde(crate = "near_sdk::serde")]
-pub enum SwapOperationAmount {
-    Amount(SwapRequestAmount),
-    OutputOfLastIn,
-    EntireBalanceIn,
-}
-
-#[derive(near_sdk::serde::Serialize)]
-#[serde(crate = "near_sdk::serde")]
-pub enum SwapRequestAmount {
-    ExactIn(U128),
-    ExactOut(U128),
-}
-
-#[derive(near_sdk::serde::Serialize)]
-#[serde(crate = "near_sdk::serde")]
-pub enum WithdrawAmount {
-    Full { at_least: Option<U128> },
-    Exact(U128),
-    PreviousSwapOutput,
-}
-
-#[near(serializers=[borsh])]
-#[derive(PartialEq, Eq, Hash, Clone)]
-pub enum AssetId {
-    Near,
-    Nep141(AccountId),
-    Nep245(AccountId, String),
-    Nep171(AccountId, String),
-}
-
-impl std::fmt::Display for AssetId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Near => write!(f, "near"),
-            Self::Nep141(contract_id) => write!(f, "nep141:{contract_id}"),
-            Self::Nep245(contract_id, token_id) => write!(f, "nep245:{contract_id}:{token_id}"),
-            Self::Nep171(contract_id, token_id) => write!(f, "nep171:{contract_id}:{token_id}"),
-        }
-    }
-}
-
-impl near_sdk::serde::Serialize for AssetId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: near_sdk::serde::Serializer,
-    {
-        self.to_string().serialize(serializer)
-    }
-}
-
-#[near(serializers=[borsh])]
-enum PoolType {
-    PrivateLatest,
-    PublicLatest,
-    LaunchLatest { phantom_liquidity: U128 },
-    LaunchV1 { phantom_liquidity_near: U128 },
-    PrivateV1,
-    PublicV1,
-    PrivateV2,
-    PublicV2,
-    LaunchV2 { phantom_liquidity: U128 },
-}
-
-#[near(serializers=[borsh])]
-enum FeeConfiguration {
-    V1(/* not supported */),
-    V2(V2FeeConfiguration),
-}
-
-pub type FeeEntryReference = (FeeReceiverReference, FeeAmount);
-pub type FeeEntry = (FeeReceiver, FeeAmount);
-
-#[near(serializers=[borsh])]
-struct V2FeeConfiguration {
-    receivers: Vec<FeeEntry>,
-}
-
 #[near(serializers=[json])]
 #[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
 pub enum FeeReceiverReference {
@@ -852,31 +730,5 @@ pub enum FeeReceiverReference {
     Holders,
 }
 
-#[near(serializers=[borsh])]
-#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
-pub enum FeeReceiver {
-    Account(AccountId),
-    Pool,
-    Community(AccountId),
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy)]
-pub enum FeeAmount {
-    Fixed(u32),
-    Scheduled {
-        start: (u64, u32),
-        end: (u64, u32),
-        curve: ScheduledFeeCurve,
-    },
-    Dynamic {
-        min: u32,
-        max: u32,
-    },
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy)]
-pub enum ScheduledFeeCurve {
-    Linear,
-}
+pub type FeeEntryReference = (FeeReceiverReference, FeeAmount);
+pub type FeeEntry = (FeeReceiver, FeeAmount);
