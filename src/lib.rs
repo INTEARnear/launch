@@ -51,7 +51,7 @@ fn quote_token_settings(quote_token: &AccountId) -> QuoteTokenSettings {
             min_first_buy_deposit: 10u128.pow(6),
         },
         TEAR_TOKEN_ID => QuoteTokenSettings {
-            phantom_liquidity: 200_000 * 10u128.pow(24),
+            phantom_liquidity: 100_000 * 10u128.pow(24),
             min_first_buy_deposit: 1_000 * 10u128.pow(24),
         },
         _ => panic!("{quote_token} can't be a quote token."),
