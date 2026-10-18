@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use intear_dex_types::{
     AssetId, Operation, SwapOperationAmount, SwapRequestAmount, WithdrawAmount,
 };
-use near_contract_standards::fungible_token::{
-    metadata::FungibleTokenMetadata, receiver::FungibleTokenReceiver,
+use near_contract_standards::{
+    fungible_token::{Balance, metadata::FungibleTokenMetadata, receiver::FungibleTokenReceiver},
+    storage_management::{StorageBalance, StorageBalanceBounds, StorageManagement},
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
-    PromiseOrValue, Timestamp,
+    AccountId, BorshStorageKey, Gas, IntoStorageKey, NearToken, PanicOnDefault, Promise,
+    PromiseError, PromiseOrValue, Timestamp,
     json_types::{Base64VecU8, U128},
     near, require,
     store::{IterableMap, LookupMap},
@@ -37,22 +38,38 @@ const INTEAR_DEX_CONTRACT_ID: &str = "dex.intear.near";
 const PLACH_DEX_ID: &str = "slimedragon.near/xyk";
 const USDC_TOKEN_ID: &str = "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
 const TEAR_TOKEN_ID: &str = "token.intear.near";
+const QUOTE_TOKEN_IDS: [&str; 2] = [USDC_TOKEN_ID, TEAR_TOKEN_ID];
+
+const STORAGE_ENTRY_COST_BYTES: u128 = 40;
+const STRING_PREFIX_BORSH_BYTES: u128 = 4;
+
+fn quote_token_storage_deposit() -> NearToken {
+    let account_id_bytes = STRING_PREFIX_BORSH_BYTES + AccountId::MAX_LEN as u128;
+    let token_storage_bytes = STORAGE_ENTRY_COST_BYTES
+        + StorageKey::StorageDeposits.into_storage_key().len() as u128
+        + account_id_bytes
+        + NearToken::ZERO.as_yoctonear().to_be_bytes().len() as u128;
+    let one_quote_token_storage_bytes = STORAGE_ENTRY_COST_BYTES
+        + StorageKey::QuoteTokenBalances.into_storage_key().len() as u128
+        + account_id_bytes
+        + account_id_bytes
+        + (0 as Balance).to_be_bytes().len() as u128;
+    near_sdk::env::storage_byte_cost().saturating_mul(
+        token_storage_bytes + one_quote_token_storage_bytes * QUOTE_TOKEN_IDS.len() as u128,
+    )
+}
 
 struct QuoteTokenSettings {
-    phantom_liquidity: u128,
-    /// Prevent storage griefing
-    min_first_buy_deposit: u128,
+    phantom_liquidity: Balance,
 }
 
 fn quote_token_settings(quote_token: &AccountId) -> QuoteTokenSettings {
     match quote_token.as_str() {
         USDC_TOKEN_ID => QuoteTokenSettings {
             phantom_liquidity: 1_500 * 10u128.pow(6),
-            min_first_buy_deposit: 10u128.pow(6),
         },
         TEAR_TOKEN_ID => QuoteTokenSettings {
             phantom_liquidity: 100_000 * 10u128.pow(24),
-            min_first_buy_deposit: 1_000 * 10u128.pow(24),
         },
         _ => panic!("{quote_token} can't be a quote token."),
     }
@@ -158,6 +175,8 @@ pub struct Contract {
     meme_id_counter: LookupMap<String, u64>,
     fees_earned: NearToken,
     quote_token_balances: LookupMap<(AccountId, AccountId), U128>,
+    /// Paid by accounts that deposit quote tokens, so their balances can't grief storage
+    storage_deposits: LookupMap<AccountId, NearToken>,
 }
 
 #[near(serializers=[borsh])]
@@ -167,6 +186,7 @@ enum StorageKey {
     IdCounter,
     LaunchData,
     QuoteTokenBalances,
+    StorageDeposits,
 }
 
 #[near]
@@ -178,6 +198,27 @@ impl Contract {
             meme_id_counter: LookupMap::new(StorageKey::IdCounter),
             fees_earned: Default::default(),
             quote_token_balances: LookupMap::new(StorageKey::QuoteTokenBalances),
+            storage_deposits: LookupMap::new(StorageKey::StorageDeposits),
+        }
+    }
+
+    #[init(ignore_state)]
+    #[private]
+    pub fn migrate() -> Self {
+        #[near(serializers=[borsh])]
+        struct OldContract {
+            launch_data: IterableMap<AccountId, LaunchInfo>,
+            meme_id_counter: LookupMap<String, u64>,
+            fees_earned: NearToken,
+            quote_token_balances: LookupMap<(AccountId, AccountId), U128>,
+        }
+        let old_state: OldContract = near_sdk::env::state_read().expect("Failed to read old state");
+        Self {
+            launch_data: old_state.launch_data,
+            meme_id_counter: old_state.meme_id_counter,
+            fees_earned: old_state.fees_earned,
+            quote_token_balances: old_state.quote_token_balances,
+            storage_deposits: LookupMap::new(StorageKey::StorageDeposits),
         }
     }
 
@@ -689,7 +730,8 @@ impl Contract {
 
 #[near]
 impl FungibleTokenReceiver for Contract {
-    /// Takes quote tokens for first buys of later launches
+    /// Takes quote tokens for first buys of later launches, from accounts registered with
+    /// storage_deposit
     fn ft_on_transfer(
         &mut self,
         sender_id: AccountId,
@@ -697,13 +739,102 @@ impl FungibleTokenReceiver for Contract {
         msg: String,
     ) -> PromiseOrValue<U128> {
         let quote_token = near_sdk::env::predecessor_account_id();
-        let min_first_buy_deposit = quote_token_settings(&quote_token).min_first_buy_deposit;
+        // Panics for tokens that can't be quote tokens
+        quote_token_settings(&quote_token);
         require!(msg.is_empty(), "msg must be empty.");
-        if amount.0 < min_first_buy_deposit {
-            panic!("Deposit at least {min_first_buy_deposit} of {quote_token}.");
+        if !self.storage_deposits.contains_key(&sender_id) {
+            panic!("Register {sender_id} with storage_deposit before depositing {quote_token}.");
         }
         self.internal_credit_quote_token(sender_id, quote_token, amount);
         PromiseOrValue::Value(U128(0))
+    }
+}
+
+/// Every account pays the same deposit, which covers its balance in every quote token, so
+/// there's never anything available to withdraw.
+#[near]
+impl StorageManagement for Contract {
+    /// Refunds the whole deposit if the account is already registered
+    #[payable]
+    #[allow(unused_variables)]
+    fn storage_deposit(
+        &mut self,
+        account_id: Option<AccountId>,
+        registration_only: Option<bool>,
+    ) -> StorageBalance {
+        let account_id = account_id.unwrap_or_else(near_sdk::env::predecessor_account_id);
+        let attached_deposit = near_sdk::env::attached_deposit();
+        let refund = if self.storage_deposits.contains_key(&account_id) {
+            attached_deposit
+        } else {
+            let Some(refund) = attached_deposit.checked_sub(quote_token_storage_deposit()) else {
+                panic!(
+                    "Insufficient deposit for storage cost. Attach at least {}",
+                    quote_token_storage_deposit()
+                );
+            };
+            self.storage_deposits
+                .insert(account_id.clone(), quote_token_storage_deposit());
+            refund
+        };
+        if !refund.is_zero() {
+            Promise::new(near_sdk::env::predecessor_account_id())
+                .transfer(refund)
+                .detach();
+        }
+        self.storage_balance_of(account_id).unwrap()
+    }
+
+    #[payable]
+    fn storage_withdraw(&mut self, amount: Option<NearToken>) -> StorageBalance {
+        near_sdk::assert_one_yocto();
+        let account_id = near_sdk::env::predecessor_account_id();
+        let Some(storage_balance) = self.storage_balance_of(account_id.clone()) else {
+            panic!("{account_id} is not registered.");
+        };
+        if amount.is_some_and(|amount| !amount.is_zero()) {
+            panic!(
+                "The whole storage deposit is in use. Unregister with storage_unregister instead."
+            );
+        }
+        storage_balance
+    }
+
+    #[payable]
+    #[allow(unused_variables)]
+    fn storage_unregister(&mut self, force: Option<bool>) -> bool {
+        near_sdk::assert_one_yocto();
+        let account_id = near_sdk::env::predecessor_account_id();
+        if QUOTE_TOKEN_IDS.iter().any(|quote_token| {
+            self.quote_token_balances
+                .contains_key(&(account_id.clone(), quote_token.parse().unwrap()))
+        }) && !force.unwrap_or_default()
+        {
+            panic!(
+                "Withdraw deposited quote tokens with withdraw_quote_token before unregistering."
+            );
+        }
+        let Some(storage_deposit) = self.storage_deposits.remove(&account_id) else {
+            return false;
+        };
+        Promise::new(account_id).transfer(storage_deposit).detach();
+        true
+    }
+
+    fn storage_balance_bounds(&self) -> StorageBalanceBounds {
+        StorageBalanceBounds {
+            min: quote_token_storage_deposit(),
+            max: Some(quote_token_storage_deposit()),
+        }
+    }
+
+    fn storage_balance_of(&self, account_id: AccountId) -> Option<StorageBalance> {
+        self.storage_deposits
+            .get(&account_id)
+            .map(|&total| StorageBalance {
+                total,
+                available: NearToken::ZERO,
+            })
     }
 }
 
