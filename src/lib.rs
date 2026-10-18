@@ -33,7 +33,8 @@ const ID_COST: NearToken = NearToken::from_yoctonear(
 );
 const SHORT_ID_COST: NearToken = NearToken::from_near(1);
 
-const TOKEN_CODE_HASH: &str = "GVFRDj8DdqUvNFwEHfAR14c8GvKU2ds8qCzCMQ88ajhT";
+// https://github.com/INTEARnear/global-ft-contract
+const TOKEN_CODE_HASH: &str = "8D1NEU2NC2hKhdtCkHyyAz2KVmVXRazm9ZQMC27D97jF";
 const INTEAR_DEX_CONTRACT_ID: &str = "dex.intear.near";
 const PLACH_DEX_ID: &str = "slimedragon.near/xyk";
 const USDC_TOKEN_ID: &str = "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
