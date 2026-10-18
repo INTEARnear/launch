@@ -369,15 +369,6 @@ impl Contract {
             }
             self.quote_token_balances.flush();
         }
-        if fees.as_ref().is_some_and(|fees| {
-            fees.iter()
-                .any(|(receiver, _)| *receiver == FeeReceiverReference::Holders)
-        }) {
-            require!(
-                quote_asset == AssetId::Near,
-                "Holder fees are only supported in launches quoted in NEAR."
-            );
-        }
         let symbol_lower = symbol.to_lowercase();
 
         let own_storage_allowed = u64::try_from(
@@ -597,9 +588,6 @@ impl Contract {
                                             FeeReceiver::Account(receiver_account_id)
                                         }
                                         FeeReceiverReference::Pool => FeeReceiver::Pool,
-                                        FeeReceiverReference::Holders => {
-                                            FeeReceiver::Community(new_token_account_id.clone())
-                                        }
                                     },
                                     amount,
                                 )
@@ -858,7 +846,6 @@ impl Contract {
 pub enum FeeReceiverReference {
     Account(AccountId),
     Pool,
-    Holders,
 }
 
 pub type FeeEntryReference = (FeeReceiverReference, FeeAmount);
