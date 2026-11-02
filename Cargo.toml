@@ -24,8 +24,13 @@ container_build_command = [
 [dependencies]
 near-sdk = { version = "5.29", features = ["global-contracts"] }
 near-contract-standards = "5.29"
-intear-dex-types = { git = "https://github.com/INTEARnear/dex", features = ["json"] }
+intear-dex-types = { git = "https://github.com/INTEARnear/dex" }
 xyk-dex-types = { git = "https://github.com/INTEARnear/dex" }
+
+# The ABI that cargo near generates natively derives schemas of the DEX types, which need their
+# hand-written schemas
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+xyk-dex-types = { git = "https://github.com/INTEARnear/dex", features = ["abi"] }
 
 [dev-dependencies]
 near-sdk = { version = "5.29", features = ["unit-testing", "global-contracts"] }

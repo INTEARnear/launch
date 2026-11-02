@@ -22,7 +22,7 @@ use near_workspaces::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
-use xyk_dex_types::{CreatePoolArgs, FeeConfiguration, PoolType, V2FeeConfiguration};
+use xyk_dex_types::{CreatePoolArgs, FeeConfigurationV2, PoolType, TokenAmount};
 
 const MAINNET_RPC_URL: &str = "https://rpc.mainnet.near.org";
 const DEX: &str = "dex.intear.near";
@@ -310,11 +310,12 @@ async fn setup() -> Env {
             args: Base64VecU8(
                 near_sdk::borsh::to_vec(&CreatePoolArgs {
                     assets: (quote_asset, launched_asset.clone()),
-                    fees: FeeConfiguration::V2(V2FeeConfiguration { receivers: vec![] }),
-                    pool_type: PoolType::LaunchV2 {
-                        phantom_liquidity: U128(10u128.pow(24)),
+                    fees: FeeConfigurationV2 { receivers: vec![] },
+                    pool_type: PoolType::LaunchLatest {
+                        phantom_liquidity: TokenAmount::new(10u128.pow(24)),
                     },
                     initial_liquidity: None,
+                    creator_fee_payout_type: None,
                 })
                 .unwrap(),
             ),

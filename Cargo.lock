@@ -221,25 +221,26 @@ dependencies = [
 
 [[package]]
 name = "borsh"
-version = "1.6.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1da5ab77c1437701eeff7c88d968729e7766172279eab0676857b3d63af7a6f"
+checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
 dependencies = [
  "borsh-derive",
+ "bytes",
  "cfg_aliases",
 ]
 
 [[package]]
 name = "borsh-derive"
-version = "1.6.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0686c856aa6aac0c4498f936d7d6a02df690f614c03e4d906d1018062b5c5e2c"
+checksum = "12cdfe656708a01f89b451a7d36466e6fe6c414de0aa18fc54f864f6f9ca9f56"
 dependencies = [
  "once_cell",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -436,7 +437,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1010,8 +1011,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "ethnum"
+version = "1.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
 
 [[package]]
 name = "eyre"
@@ -1593,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "intear-dex-types"
 version = "0.1.0"
-source = "git+https://github.com/INTEARnear/dex#8a092815571b2a9708e9c557755e634e6c99323f"
+source = "git+https://github.com/INTEARnear/dex#d2a55aeb416b79da8f67aef066d5defb314c3e99"
 dependencies = [
  "near-sdk",
 ]
@@ -2003,6 +2010,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91f75ff8eee73815c247d0e17f3c0b705f0e993922a5548acd2ad377aeb67fca"
 dependencies = [
  "borsh",
+ "schemars 0.8.22",
  "serde",
 ]
 
@@ -2120,6 +2128,7 @@ dependencies = [
  "near-crypto-hash",
  "near-primitives-core",
  "near-sdk-env",
+ "schemars 0.8.22",
  "serde",
  "serde_with",
  "sha3 0.11.0",
@@ -2301,6 +2310,7 @@ dependencies = [
  "base64 0.22.1",
  "borsh",
  "bs58 0.5.1",
+ "near-abi",
  "near-account-id",
  "near-crypto",
  "near-gas",
@@ -2315,6 +2325,7 @@ dependencies = [
  "near-token",
  "near-vm-runner",
  "once_cell",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_with",
@@ -2340,6 +2351,7 @@ dependencies = [
  "near-primitives-core",
  "near-sdk-env",
  "near-token",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_with",
@@ -2405,6 +2417,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34de6b54d82d0790b2a56b677e7b4ecb7f021a7e8559f8611065c890d56cfcda"
 dependencies = [
  "borsh",
+ "schemars 0.8.22",
  "serde",
 ]
 
@@ -2856,7 +2869,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3153,7 +3166,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3212,7 +3225,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3505,6 +3518,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.13.0",
  "jiff",
+ "schemars 0.8.22",
  "schemars 0.9.0",
  "schemars 1.2.1",
  "serde_core",
@@ -3821,7 +3835,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4434,7 +4448,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4620,8 +4634,9 @@ dependencies = [
 [[package]]
 name = "xyk-dex-types"
 version = "0.1.0"
-source = "git+https://github.com/INTEARnear/dex#8a092815571b2a9708e9c557755e634e6c99323f"
+source = "git+https://github.com/INTEARnear/dex#d2a55aeb416b79da8f67aef066d5defb314c3e99"
 dependencies = [
+ "ethnum",
  "intear-dex-types",
  "near-sdk",
 ]

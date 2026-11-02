@@ -16,8 +16,8 @@ use near_sdk::{
     store::{IterableMap, LookupMap},
 };
 use xyk_dex_types::{
-    CreatePoolArgs, FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeReceiver,
-    PROTOCOL_FEE_RECEIVER_ID, PoolType, SwapArgs, SwapRoute, V2FeeConfiguration,
+    ClaimMode, CreatePoolArgs, FeeAmount, FeeConfigurationV2, FeePayoutType, FeeReceiver,
+    LAST_CREATED_POOL_ID_MARKER, PROTOCOL_FEE_RECEIVER_ID, PoolType, SwapArgs, TokenAmount,
 };
 
 const SHORT_ID_COST: NearToken = NearToken::from_near(1);
@@ -123,7 +123,7 @@ fn dex_storage_bytes(asset: &AssetId) -> u128 {
 fn pool_storage_bytes(
     quote_asset: &AssetId,
     token_asset: &AssetId,
-    fees: &FeeConfiguration,
+    fees: &FeeConfigurationV2,
     receivers: &[FeeEntry],
 ) -> u128 {
     let record = |key_len: u128, value_len: u128| {
@@ -144,10 +144,9 @@ fn pool_storage_bytes(
     let receiver_records: u128 = receivers
         .iter()
         .filter_map(|(receiver, _)| match receiver {
-            FeeReceiver::Account(account_id) => {
-                Some(fee_record(account_id, quote_asset) + fee_record(account_id, token_asset))
-            }
-            FeeReceiver::Pool | FeeReceiver::Community(_) => None,
+            FeeReceiver::Account { account_id, .. } => Some(fee_record(account_id, quote_asset)),
+            FeeReceiver::Pool => None,
+            FeeReceiver::Protocol => unreachable!("Fee receivers can't be the protocol"),
         })
         .sum();
     pool + fee_record(PROTOCOL_FEE_RECEIVER_ID, token_asset) + receiver_records
@@ -564,8 +563,11 @@ impl Contract {
                         AssetId::Nep141(new_token_account_id.clone()),
                     ),
                     fees: fee_configuration,
-                    pool_type: launch_pool_type(phantom_liquidity),
+                    pool_type: PoolType::LaunchV2 {
+                        phantom_liquidity: TokenAmount::new(phantom_liquidity),
+                    },
                     initial_liquidity: None,
+                    creator_fee_payout_type: None,
                 })
                 .unwrap(),
             ),
@@ -580,13 +582,9 @@ impl Contract {
                 Operation::SwapSimple {
                     dex_id: PLACH_DEX_ID.parse().unwrap(),
                     message: Base64VecU8(
-                        near_sdk::borsh::to_vec(&SwapArgs {
-                            routes: vec![SwapRoute {
-                                fraction: FULL_SPLIT_FRACTION,
-                                pool_ids: vec![u32::MAX],
-                            }],
-                            fee_discount: None,
-                        })
+                        near_sdk::borsh::to_vec(&SwapArgs::single_pool(
+                            LAST_CREATED_POOL_ID_MARKER,
+                        ))
                         .unwrap(),
                     ),
                     asset_in: quote_asset,
@@ -812,7 +810,7 @@ struct LaunchPlan {
     symbol_lower: String,
     id_number: Option<u64>,
     quote_asset: AssetId,
-    fee_configuration: FeeConfiguration,
+    fee_configuration: FeeConfigurationV2,
     phantom_liquidity: Balance,
     metadata: FungibleTokenMetadata,
     launch_info: LaunchInfo,
@@ -822,12 +820,6 @@ struct LaunchPlan {
     dex_storage_deposit: NearToken,
     pool_storage_deposit: NearToken,
     deposit: NearToken,
-}
-
-fn launch_pool_type(phantom_liquidity: Balance) -> PoolType {
-    PoolType::LaunchV2 {
-        phantom_liquidity: U128(phantom_liquidity),
-    }
 }
 
 impl Contract {
@@ -904,7 +896,11 @@ impl Contract {
                 (
                     match receiver {
                         FeeReceiverReference::Account(receiver_account_id) => {
-                            FeeReceiver::Account(receiver_account_id)
+                            FeeReceiver::Account {
+                                account_id: receiver_account_id,
+                                payout_type: FeePayoutType::ConvertToFirstAsset,
+                                claim_mode: ClaimMode::OnlyOwner,
+                            }
                         }
                         FeeReceiverReference::Pool => FeeReceiver::Pool,
                     },
@@ -912,16 +908,11 @@ impl Contract {
                 )
             })
             .collect::<Vec<FeeEntry>>();
-        let fee_configuration = FeeConfiguration::V2(V2FeeConfiguration {
+        let fee_configuration = FeeConfigurationV2 {
             receivers: receivers.clone(),
-        });
+        };
         // Fees only go down over time, so they're also valid when the pool is created
-        if let Some((_, phantom_liquidity)) = quote
-            && let Err(error) = fee_configuration.validate(
-                &launch_pool_type(phantom_liquidity),
-                near_sdk::env::block_timestamp(),
-            )
-        {
+        if let Err(error) = fee_configuration.validate(near_sdk::env::block_timestamp()) {
             errors.push(format!("Invalid fees: {error}"));
         }
         if !receivers.iter().enumerate().all(|(index, (receiver, _))| {
